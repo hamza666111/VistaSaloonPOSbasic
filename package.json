@@ -1,0 +1,43 @@
+{
+  "name": "vistasaloonmanagement",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b",
+    "test:ui": "node tools/ui-smoke.mjs",
+    "test:categories": "node tools/categories-smoke.mjs",
+    "test:category-sync": "node tools/category-sync-test.mjs",
+    "test:invoice-actions": "node tools/invoice-actions-smoke.mjs",
+    "test:app-settings": "node tools/app-settings-smoke.mjs",
+    "test:shared-settings": "node tools/category-sync-test.mjs",
+    "test:mobile": "node tools/mobile-smoke.mjs",
+    "test:mobile-billing": "node tools/mobile-billing-smoke.mjs",
+    "test:migrations": "node tools/migrations-test.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.91.1",
+    "lucide-react": "^0.533.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.1",
+    "xlsx": "^0.18.5",
+    "zustand": "^4.4.7"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.10",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^24.0.14",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.5.2",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.0"
+  }
+}

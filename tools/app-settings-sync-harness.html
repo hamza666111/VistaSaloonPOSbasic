@@ -1,0 +1,9 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>App settings sync harness</title></head><body><div id="root"></div><script type="module">
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import {useAppSettings,startAppSettingsSync} from '/src/store/useAppSettings.ts';
+import {AppSettingsPanel} from '/src/components/AppSettingsPanel.tsx';
+import '/src/index.css';
+window.settingsStore=useAppSettings;window.stopSettings=startAppSettingsSync();
+createRoot(document.getElementById('root')).render(React.createElement('div',{className:'workspace-content p-6'},React.createElement(AppSettingsPanel)));
+</script></body></html>

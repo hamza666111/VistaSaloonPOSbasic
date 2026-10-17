@@ -1,0 +1,172 @@
+import { chromium } from '@playwright/test';
+import assert from 'node:assert/strict';
+import { mkdir } from 'node:fs/promises';
+const browser = await chromium.launch({ channel:'chrome', headless:true });
+const context = await browser.newContext({viewport:{width:1440,height:1000}});
+await context.addInitScript(() => {
+  window.__invoiceEvents = [];
+  window.__blockWhatsApp = false;
+  window.open = (url, target) => {
+    window.__invoiceEvents.push({kind:'reserve',url,target});
+    if (window.__blockWhatsApp) return null;
+    const popup = { closed:false, opener:window, document:{title:'',body:{textContent:''}}, location:{replace: url => window.__invoiceEvents.push({kind:'whatsapp',url})}, close:() => { popup.closed=true; window.__invoiceEvents.push({kind:'close-reservation'}); } };
+    return popup;
+  };
+  window.print = () => window.__invoiceEvents.push({kind:'print',text:document.getElementById('printable-invoice')?.textContent});
+});
+const external = [], errors = [], dialogs = [];
+await context.route('**/*', route => {
+  if (!['127.0.0.1','localhost'].includes(new URL(route.request().url()).hostname)) { external.push(route.request().url()); return route.abort(); }
+  return route.continue();
+});
+const page = await context.newPage();
+page.setDefaultTimeout(15000);
+page.on('pageerror', error => errors.push(error.message));
+page.on('dialog', dialog => { if (dialog.type() !== 'beforeunload') dialogs.push(dialog.message()); return dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss(); });
+const state = () => page.evaluate(() => JSON.parse(localStorage.getItem('vistasaloon-demo-storage-v1')).state);
+const events = () => page.evaluate(() => window.__invoiceEvents);
+const notice = () => page.getByRole('status').filter({hasText:/Invoice saved/}).waitFor();
+let customerId;
+const prepareBill = async (walkIn = false) => {
+  await page.getByRole('button',{name:'Aisha Noor',exact:true}).click();
+  await page.locator('.pos-service-tile').filter({hasText:'Hair Cut - Regular'}).click();
+  await page.getByRole('combobox',{name:'Select customer',exact:true}).selectOption(walkIn ? '' : customerId);
+};
+const preview = async id => {
+  await page.getByRole('link',{name:'Invoices',exact:true}).click();
+  await page.getByRole('heading',{name:'Sales & invoices',exact:true}).waitFor();
+  for (let index=0;index<12;index++) {
+    const row = page.locator('.invoice-row').filter({has:page.locator('[data-label="ID"]',{hasText:id.slice(0,8)})});
+    if (await row.count()) { await row.locator('[data-label="Customer"]').click(); break; }
+    await page.getByRole('button',{name:'Next',exact:true}).click();
+  }
+  const receipt = page.getByRole('dialog',{name:'Invoice Receipt'});
+  await receipt.waitFor();
+  return receipt;
+};
+try {
+  await page.goto(process.env.TEST_BASE_URL || 'http://127.0.0.1:5173/');
+  await page.getByLabel('Email address').fill('admin@vistasaloon.local');
+  await page.getByLabel('Password',{exact:true}).fill('VistaLocal123!');
+  await page.getByRole('button',{name:'Enter workspace'}).click();
+  await page.getByRole('heading',{name:'Good service starts here.'}).waitFor();
+  const normalization = await page.evaluate(async () => {
+    const {normalizeWhatsAppPhone:n} = await import('/src/utils/invoiceWhatsApp.ts');
+    return [n('0300 1234567'),n('3001234567'),n('+92 (300) 123-4567'),n('00447700900123'),n('+44 7700 900123'),n('07700900123','44'),n('00000000001'),n(''),n('0300abc4567'),n('++923001234567')];
+  });
+  assert.deepEqual(normalization,['923001234567','923001234567','923001234567','447700900123','447700900123','447700900123',null,null,null,null]);
+  const initial = await state();
+  const count = initial.invoices.length;
+  await page.getByPlaceholder('New customer name').fill('WhatsApp Test Client');
+  await page.getByPlaceholder('Phone',{exact:true}).fill('03001234567');
+  await page.getByRole('button',{name:'Add & Select Customer'}).click();
+  customerId = (await state()).customers.find(customer=>customer.name==='WhatsApp Test Client').id;
+  await page.getByRole('button',{name:'Aisha Noor',exact:true}).click();
+  await page.locator('.pos-service-tile').filter({hasText:'Hair Cut - Regular'}).click();
+  await page.locator('input[type="number"]').fill('50');
+  await page.getByRole('button',{name:'Save only',exact:true}).click();
+  await notice();
+  assert.equal((await state()).invoices.length,count+1);
+  assert.equal((await state()).invoices[0].total,350);
+  assert.deepEqual(await events(),[]);
+  await page.getByPlaceholder('New customer name').waitFor();
+  console.log('PASS: Save only persists the discounted invoice without print or WhatsApp popups.');
+
+  await prepareBill();
+  await page.getByRole('button',{name:'Save + Print',exact:true}).click();
+  await notice();
+  assert.equal((await state()).invoices.length,count+2);
+  assert.equal((await events()).filter(event=>event.kind==='print').length,1);
+  assert.equal((await events()).filter(event=>event.kind==='reserve').length,0);
+  assert.ok((await events()).find(event=>event.kind==='print').text.includes('Vista Saloon'));
+  await prepareBill();
+  await page.evaluate(async () => {
+    const { useStore } = await import('/src/store/useStore.ts');
+    window.__originalCreate = useStore.getState().createInvoice;
+    useStore.setState({createInvoice: async invoice => { await new Promise(resolve=>{window.__releaseInvoiceSave=resolve;}); await window.__originalCreate(invoice); }});
+  });
+  await page.getByRole('button',{name:'Save + WhatsApp',exact:true}).click();
+  await page.waitForFunction(()=>typeof window.__releaseInvoiceSave==='function');
+  assert.equal((await state()).invoices.length,count+2);
+  assert.equal((await events()).filter(event=>event.kind==='whatsapp').length,0);
+  assert.equal(await page.getByRole('button',{name:'Save + WhatsApp',exact:true}).isDisabled(),true);
+  await page.evaluate(()=>window.__releaseInvoiceSave());
+  await notice();
+  let current = await state();
+  assert.equal(current.invoices.length,count+3);
+  const savedWhatsAppInvoice = current.invoices[0];
+  const shared = (await events()).find(event=>event.kind==='whatsapp');
+  const link = new URL(shared.url);
+  assert.equal(link.origin,'https://wa.me');
+  assert.equal(link.pathname,'/923001234567');
+  assert.ok(link.searchParams.get('text').includes(savedWhatsAppInvoice.id));
+  assert.ok(link.searchParams.get('text').includes('WhatsApp Test Client'));
+  assert.ok(link.searchParams.get('text').includes('Total: Rs. 400.00'));
+  assert.ok(link.searchParams.get('text').includes('Status: Paid'));
+  await page.evaluate(async()=>{ const {useStore}=await import('/src/store/useStore.ts'); useStore.setState({createInvoice:window.__originalCreate}); });
+  console.log('PASS: Print retains its behavior; WhatsApp opens the correct phone/message only after save acknowledgement; pending actions are locked.');
+
+  let receipt = await preview(savedWhatsAppInvoice.id);
+  const savedBeforePreview = (await state()).invoices;
+  assert.equal(await receipt.getByRole('button',{name:/Save/}).count(),0);
+  await receipt.getByRole('button',{name:'WhatsApp',exact:true}).click();
+  assert.equal((await events()).filter(event=>event.kind==='whatsapp').length,2);
+  await receipt.getByRole('button',{name:'Print',exact:true}).click();
+  await page.waitForFunction(()=>window.__invoiceEvents.filter(event=>event.kind==='print').length===2);
+  await receipt.getByRole('button',{name:'Close',exact:true}).click();
+  await receipt.waitFor({state:'hidden'});
+  assert.deepEqual((await state()).invoices,savedBeforePreview);
+  await page.getByRole('link',{name:'Point of sale',exact:true}).click();
+  await prepareBill();
+  await page.evaluate(async()=>{ const {useStore}=await import('/src/store/useStore.ts'); window.__originalCreate=useStore.getState().createInvoice; useStore.setState({createInvoice:async()=>{throw new Error('Simulated invoice save failure');}}); });
+  const navigations = (await events()).filter(event=>event.kind==='whatsapp').length;
+  await page.getByRole('button',{name:'Save + WhatsApp',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'Simulated invoice save failure'}).waitFor();
+  assert.equal((await state()).invoices.length,count+3);
+  assert.equal((await events()).filter(event=>event.kind==='whatsapp').length,navigations);
+  assert.equal((await events()).filter(event=>event.kind==='close-reservation').length,1);
+  assert.equal(await page.getByRole('button',{name:'Remove Hair Cut - Regular'}).count(),1);
+  await page.evaluate(async()=>{ const {useStore}=await import('/src/store/useStore.ts'); useStore.setState({createInvoice:window.__originalCreate}); });
+  await page.getByRole('button',{name:'Save only',exact:true}).click(); await notice();
+  assert.equal((await state()).invoices.length,count+4);
+  console.log('PASS: Preview actions do not resave/duplicate invoices. Failed persistence keeps the bill and closes the reserved tab without sharing.');
+
+  await prepareBill();
+  await page.evaluate(()=>{window.__blockWhatsApp=true;});
+  await page.getByRole('button',{name:'Save + WhatsApp',exact:true}).click(); await notice();
+  assert.equal((await state()).invoices.length,count+5);
+  const fallback = page.getByRole('link',{name:'Open WhatsApp',exact:true});
+  await fallback.waitFor();
+  assert.ok((await fallback.getAttribute('href')).startsWith('https://wa.me/923001234567?text='));
+  const blockedInvoice = (await state()).invoices[0];
+  receipt = await preview(blockedInvoice.id);
+  await receipt.getByRole('button',{name:'WhatsApp',exact:true}).click();
+  await receipt.getByRole('link',{name:'Open WhatsApp',exact:true}).waitFor();
+  await receipt.getByRole('button',{name:'Close',exact:true}).click();
+  await page.getByRole('link',{name:'Point of sale',exact:true}).click();
+  await prepareBill();
+  await page.evaluate(()=>{window.print=()=>{throw new Error('Printer not available');};});
+  await page.getByRole('button',{name:'Save + Print',exact:true}).click();
+  await page.getByRole('status').filter({hasText:'Invoice saved. Open it in Invoices to try printing again.'}).waitFor();
+  assert.equal((await state()).invoices.length,count+6);
+  assert.equal(await page.getByRole('button',{name:'Remove Hair Cut - Regular'}).count(),0);
+  await page.evaluate(()=>{window.print=()=>window.__invoiceEvents.push({kind:'print',text:document.getElementById('printable-invoice')?.textContent});});
+  await prepareBill(true);
+  assert.equal(await page.getByRole('button',{name:'Save + WhatsApp',exact:true}).isDisabled(),true);
+  await page.getByRole('button',{name:'Save only',exact:true}).click(); await notice();
+  const walkInInvoice = (await state()).invoices[0];
+  receipt = await preview(walkInInvoice.id);
+  assert.equal(await receipt.getByRole('button',{name:'WhatsApp',exact:true}).isDisabled(),true);
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await mkdir('.qa',{recursive:true});
+  await page.screenshot({path:'.qa/invoice-actions-preview-mobile.png',fullPage:true,animations:'disabled'});
+  await receipt.getByRole('button',{name:'Close',exact:true}).click();
+  await page.getByRole('navigation',{name:'Quick navigation'}).getByRole('link',{name:'POS',exact:true}).click();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.screenshot({path:'.qa/invoice-actions-pos-mobile.png',fullPage:true,animations:'disabled'});
+  assert.deepEqual(dialogs,[]);
+  assert.deepEqual(external,[]);
+  assert.deepEqual(errors,[]);
+  console.log('PASS: blocked-window fallback, walk-in/missing-number handling, and mobile layouts. No actual WhatsApp requests, messages, or printer dialogs.');
+} finally { await browser.close(); }
