@@ -75,7 +75,7 @@ try {
   assert.equal(state.invoices[0].status, 'paid');
   assert.equal(state.invoices[0].items[0].barberName, teamMember);
   assert.equal(state.customers.length, initial.customers.length + 1);
-  assert.ok(state.pendingMutations.length > 0);
+  assert.deepEqual(state.pendingMutations, []); // Local demo writes never queue for an online project.
   await page.getByPlaceholder('New customer name').waitFor();
   await page.reload();
   state = await persisted();

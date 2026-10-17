@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { Login } from './pages/Login';
 import { startCategorySync, useServiceCategories } from './store/useServiceCategories';
-import { useStore } from './store/useStore';
+import { useStore, startProductionSync } from './store/useStore';
 import { isSupabaseConfigured } from './api/supabase';
 import { startAppSettingsSync, useAppSettings } from './store/useAppSettings';
 import { warmReceiptAssetsCache } from './hooks/useReceiptAssets';
@@ -16,16 +16,17 @@ const Invoices=lazy(()=>import('./pages/Invoices').then(module=>({default:module
 const Statistics=lazy(()=>import('./pages/Statistics').then(module=>({default:module.Statistics})));
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated, syncData } = useStore();
+  const { isAuthenticated, authInitializing, syncData } = useStore();
 
   useEffect(() => {
     if (isAuthenticated && isSupabaseConfigured()) {
-      syncData();
+      void syncData().catch(() => {});
     }
   }, [isAuthenticated, syncData]);
   useEffect(() => {
     if (isAuthenticated) return startCategorySync();
   }, [isAuthenticated]);
+  if (authInitializing) return <div role="status" className="page-loading">Restoring your workspace...</div>;
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
   }
@@ -33,7 +34,9 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 };
 
 function App() {
-  useEffect(()=>startAppSettingsSync(),[]);
+  const authenticated=useStore(state=>state.isAuthenticated);
+  useEffect(()=>startProductionSync(),[]);
+  useEffect(()=>{if(authenticated || !isSupabaseConfigured())return startAppSettingsSync();},[authenticated]);
   useEffect(() => {
     void warmReceiptAssetsCache();
   }, []);
@@ -41,7 +44,7 @@ function App() {
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       const state = useStore.getState();
-      if (state.pendingMutations.length > 0 || useServiceCategories.getState().isSaving || useAppSettings.getState().isSaving) {
+      if (state.isSaving || state.pendingMutations.length > 0 || useServiceCategories.getState().isSaving || useAppSettings.getState().isSaving) {
         e.preventDefault();
         e.returnValue = '';
       }

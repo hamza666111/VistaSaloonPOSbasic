@@ -1,6 +1,12 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+/* Preserve the existing design defaults after the Tailwind 4 security upgrade. */
+@layer base {
+  *, ::before, ::after { border-color: var(--color-gray-200, #e5e7eb); }
+  button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+}
+
 
 @layer base {
   :root { font-family: "Segoe UI", Arial, sans-serif; color: var(--theme-253b36, #253b36); background: #f6f6f2; font-synthesis: none; }

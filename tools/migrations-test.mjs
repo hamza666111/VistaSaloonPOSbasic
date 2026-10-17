@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile,readdir} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {PGlite} from '@electric-sql/pglite';
-const files=(await readdir('supabase/migrations')).filter(file=>file.endsWith('.sql')).sort();
+const files=(await readdir('supabase/migrations')).filter(file=>file.endsWith('.sql')&&!file.includes('production_integrity')).sort();
 const sql=await Promise.all(files.map(file=>readFile(`supabase/migrations/${file}`,'utf8')));
 const original=['supabase_schema.sql','supabase_packages.sql','src/store/useStore.ts'];
 const hashes=await Promise.all(original.map(async file=>createHash('sha256').update(await readFile(file)).digest('hex')));

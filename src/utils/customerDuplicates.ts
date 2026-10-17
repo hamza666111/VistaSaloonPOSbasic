@@ -29,7 +29,8 @@ export const findDuplicateCustomers = (
   candidate: Pick<Customer, 'id' | 'name' | 'phone'>,
   excludeId?: string
 ) => {
-  const phoneSuffix = getCustomerPhoneLastDigits(candidate.phone);
+  const phoneKey=(phone:string)=>getCustomerPhoneLastDigits(phone)||phone.replace(/\D/g,'');
+  const phoneSuffix = phoneKey(candidate.phone);
 
   return customers
     .flatMap((existingCustomer) => {
@@ -38,7 +39,7 @@ export const findDuplicateCustomers = (
       }
 
       const matchedByPhone =
-        phoneSuffix !== '' && getCustomerPhoneLastDigits(existingCustomer.phone) === phoneSuffix;
+        phoneSuffix !== '' && phoneKey(existingCustomer.phone) === phoneSuffix;
 
       if (!matchedByPhone) {
         return [];
@@ -61,12 +62,12 @@ export const isDuplicateCustomerError = (error: unknown): error is DuplicateCust
 
 export const formatDuplicateMatchReason = (match: DuplicateCustomerMatch) => {
   if (match.matchedByName && match.matchedByPhone) {
-    return 'Same name and last 7 digits of phone';
+    return 'Same name and last 11 digits of phone';
   }
   if (match.matchedByName) {
     return 'Same name';
   }
-  return 'Same last 7 digits of phone';
+  return 'Same last 11 digits of phone';
 };
 
 export const formatDuplicateCustomerMessage = (matches: DuplicateCustomerMatch[]) => {

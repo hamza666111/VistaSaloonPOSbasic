@@ -1,7 +1,10 @@
+import { newUuid } from '../utils/uuid';
+import { roundMoney } from '../utils/money';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useServiceCategories } from '../store/useServiceCategories';
 import { useStore } from '../store/useStore';
+import { supabase } from '../api/supabase';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import { ResponsiveDialog } from '../components/ResponsiveDialog';
@@ -30,6 +33,8 @@ export const POS: React.FC = () => {
     addCustomer, createInvoice, updateInvoice 
   } = useStore();
 
+  const draftStorageKey = supabase ? `vistasaloon-bill-draft:${new URL(import.meta.env.VITE_SUPABASE_URL).host}:${useStore.getState().userId}` : `vistasaloon-local-bill-draft:${import.meta.env.VITE_DEMO_MODE}`;
+  const [restoredDraft] = useState(()=>{try{return JSON.parse(sessionStorage.getItem(draftStorageKey)||'{}');}catch{return {};}});
   const { logoSrc } = useReceiptAssets();
   const salonName=useAppSettings(state=>state.settings.salonName);
   const { categories, serviceCategories } = useServiceCategories();
@@ -40,19 +45,19 @@ export const POS: React.FC = () => {
   const activeServiceCount = services.filter(service => service.active !== false).length;
   const uncategorizedCount = services.filter(service => service.active !== false && isUncategorized(service.id)).length;
 
-  const [selectedBarberId, setSelectedBarberId] = useState<string>('');
-  const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
+  const [selectedBarberId, setSelectedBarberId] = useState<string>(restoredDraft.selectedBarberId||'');
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string>(restoredDraft.selectedCustomerId||'');
   const [isCustomerPickerOpen, setIsCustomerPickerOpen] = useState(true);
   const [customerSearch, setCustomerSearch] = useState<string>('');
   const [serviceSearch, setServiceSearch] = useState<string>('');
   const [quickCustomerName, setQuickCustomerName] = useState<string>('');
   const [quickCustomerPhone, setQuickCustomerPhone] = useState<string>('');
-  const [discountValue, setDiscountValue] = useState<number>(0);
-  const [discountType, setDiscountType] = useState<'amount' | 'percent'>('amount');
+  const [discountValue, setDiscountValue] = useState<number>(restoredDraft.discountValue||0);
+  const [discountType, setDiscountType] = useState<'amount' | 'percent'>(restoredDraft.discountType||'amount');
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [lastInvoice, setLastInvoice] = useState<Invoice | null>(null);
-  const [isPaid, setIsPaid] = useState<boolean>(true);
-  const [paymentMode, setPaymentMode] = useState<'cash' | 'online'>('cash');
+  const [isPaid, setIsPaid] = useState<boolean>(restoredDraft.isPaid??true);
+  const [paymentMode, setPaymentMode] = useState<'cash' | 'online'>(restoredDraft.paymentMode||'cash');
   const [currentInvoiceId, setCurrentInvoiceId] = useState<string | null>(null);
   const [quickAddDuplicateState, setQuickAddDuplicateState] = useState<QuickAddDuplicateState | null>(null);
 
@@ -65,17 +70,23 @@ export const POS: React.FC = () => {
   useDialogFocus(billRef,mobile && mobileBillOpen,()=>{if(!checkoutLock.current)setMobileBillOpen(false);});
 
   const checkoutLock = useRef(false);
+  const checkoutDraft = useRef<{id:string;date:string}|null>(restoredDraft.checkoutDraft||null);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [checkoutError, setCheckoutError] = useState('');
   const [checkoutNotice, setCheckoutNotice] = useState('');
   const [whatsAppFallback, setWhatsAppFallback] = useState<string | null>(null);
 
-  const subtotal = cart.reduce((sum, item) => sum + item.price, 0);
-  const discountAmount = Math.max(0, Math.min(
+  useEffect(()=>{
+    try{sessionStorage.setItem(draftStorageKey,JSON.stringify({cart,selectedBarberId,selectedCustomerId,discountValue,discountType,isPaid,paymentMode,checkoutDraft:checkoutDraft.current}));}
+    catch{setCheckoutError('Browser storage is unavailable. Keep this tab open until the bill is saved.');}
+  },[cart,selectedBarberId,selectedCustomerId,discountValue,discountType,isPaid,paymentMode,draftStorageKey]);
+
+  const subtotal = roundMoney(cart.reduce((sum, item) => sum + roundMoney(item.price), 0));
+  const discountAmount = roundMoney(Math.max(0, Math.min(
     discountType === 'percent' ? (subtotal * (discountValue / 100)) : discountValue,
     subtotal
-  ));
-  const total = Math.max(0, subtotal - discountAmount);
+  )));
+  const total = roundMoney(Math.max(0, subtotal - discountAmount));
 
   const normalizedSearch = customerSearch.trim().toLowerCase();
   const filteredCustomers = useMemo(() => {
@@ -186,7 +197,7 @@ export const POS: React.FC = () => {
     }
 
     const newCustomer: Customer = {
-      id: crypto.randomUUID(),
+      id: newUuid(),
       name: quickCustomerName.trim(),
       phone: quickCustomerPhone.trim(),
     };
@@ -222,14 +233,15 @@ export const POS: React.FC = () => {
     const whatsAppWindow = action === 'whatsapp' ? reserveWhatsAppWindow() : null;
     
     const customer = customers.find(c => c.id === selectedCustomerId);
-    const invoiceId = currentInvoiceId || crypto.randomUUID();
+    checkoutDraft.current ||= {id:newUuid(),date:new Date().toISOString()};
+    const invoiceId = currentInvoiceId || checkoutDraft.current.id;
     const existingInvoice = currentInvoiceId
       ? invoices.find(inv => inv.id === currentInvoiceId)
       : undefined;
     
     const invoice: Invoice = {
       id: invoiceId,
-      date: existingInvoice?.date || new Date().toISOString(),
+      date: existingInvoice?.date || checkoutDraft.current.date,
       customerId: selectedCustomerId || undefined,
       customerName: customer?.name || 'Walk-in Customer',
       items: [...cart],
@@ -243,6 +255,7 @@ export const POS: React.FC = () => {
     };
 
     try {
+      sessionStorage.setItem(draftStorageKey,JSON.stringify({...JSON.parse(sessionStorage.getItem(draftStorageKey)||'{}'),checkoutDraft:checkoutDraft.current}));
       if (existingInvoice) {
         await updateInvoice(invoice);
       } else {
@@ -272,6 +285,7 @@ export const POS: React.FC = () => {
   };
 
   const handleNewBill = () => {
+    checkoutDraft.current=null;
     setCheckoutError(''); setCheckoutNotice(''); setWhatsAppFallback(null);
     clearCart();
     setDiscountValue(0);

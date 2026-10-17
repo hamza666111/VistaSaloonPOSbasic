@@ -1,3 +1,4 @@
+import { newUuid } from './uuid';
 import type { WorkBook, WorkSheet, CellObject } from 'xlsx';
 import type { Customer } from '../types';
 import { getCustomerPhoneLastDigits } from './customerDuplicates';
@@ -35,7 +36,7 @@ export function extractImportSheet(sheet:WorkSheet, encodeCell:(cell:{r:number;c
   for(let row=1;row<=full.e.r;row++){
     const cells=headers.map((_,column)=>cell(row,column));
     if(cells.every(value=>!value.text&&!value.formula))continue;
-    rows.push({row:row+1,cells,id:crypto.randomUUID()});
+    rows.push({row:row+1,cells,id:newUuid()});
   }
   if(!rows.length)throw new Error('No customer rows found below the headings.');
   return {headers,rows};

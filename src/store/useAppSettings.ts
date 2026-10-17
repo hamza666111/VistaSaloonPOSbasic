@@ -1,3 +1,4 @@
+import { newUuid } from '../utils/uuid';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { supabase } from '../api/supabase';
@@ -98,7 +99,7 @@ export function startAppSettingsSync() {
   const refresh=()=>{if(!stopped && document.visibilityState!=='hidden') void useAppSettings.getState().sync();};
   const schedule=()=>{clearTimeout(debounce);debounce=setTimeout(refresh,120);};
   const visibility=()=>{if(document.visibilityState==='visible')refresh();};
-  const channel=supabase.channel(`app-settings-${crypto.randomUUID()}`).on('postgres_changes',{event:'*',schema:'public',table:'app_settings'},schedule).subscribe(status=>{if(status==='SUBSCRIBED')schedule();});
+  const channel=supabase.channel(`app-settings-${newUuid()}`).on('postgres_changes',{event:'*',schema:'public',table:'app_settings'},schedule).subscribe(status=>{if(status==='SUBSCRIBED')schedule();});
   const interval=setInterval(refresh,30000);
   window.addEventListener('focus',refresh);window.addEventListener('online',refresh);window.addEventListener('offline',refresh);document.addEventListener('visibilitychange',visibility);
   refresh();

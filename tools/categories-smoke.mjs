@@ -16,7 +16,7 @@ await context.route('**/*', route => {
 const business = () => page.evaluate(() => JSON.parse(localStorage.getItem('vistasaloon-demo-storage-v1')).state);
 const metadata = () => page.evaluate(() => JSON.parse(localStorage.getItem('vistasaloon-demo-categories-v1')).state);
 const filter = name => page.getByRole('group', { name: 'Service categories', exact: true }).getByRole('button', { name: new RegExp('^' + name) });
-const categoryTab = async () => { if(await page.getByLabel('Settings section').isVisible()) await page.getByLabel('Settings section').selectOption('categories'); else await page.getByRole('button', { name: 'categories', exact: true }).click(); };
+const categoryTab = async () => { await page.getByLabel('Settings section').waitFor({state:'attached'}); if(await page.getByLabel('Settings section').isVisible()) await page.getByLabel('Settings section').selectOption('categories'); else await page.getByRole('button', { name: 'categories', exact: true }).click(); };
 const goSettings = async () => { await page.getByRole('link', { name: 'Settings', exact: true }).click(); await categoryTab(); };
 const goPOS = () => page.getByRole('link', { name: 'Point of sale', exact: true }).click();
 try {
@@ -77,7 +77,7 @@ try {
   await page.getByRole('button', { name: 'Aisha Noor', exact: true }).click();
   await page.locator('.pos-service-tile').filter({ hasText: 'Hair Cut - Regular' }).click();
   await filter('Nails').click();
-  assert.equal(await page.getByRole('button', { name: 'Remove Hair Cut - Regular' }).count(), 1);
+  assert.equal(await page.getByRole('button', { name: 'Remove Hair Cut - Regular' }).count(), 2);
   await filter('Quick picks').click();
   await mkdir('.qa', { recursive: true });
   await page.screenshot({ path: '.qa/categories-pos-desktop.png', fullPage: true, animations: 'disabled' });

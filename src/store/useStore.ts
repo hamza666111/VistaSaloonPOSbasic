@@ -1,1125 +1,254 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { isDemoMode } from '../demo/mode';
-import { persist } from 'zustand/middleware';
-import { Barber, Service, ServicePackage, Customer, Invoice, InvoiceItem } from '../types';
 import { supabase } from '../api/supabase';
+import type { Barber, Service, ServicePackage, Customer, Invoice, InvoiceItem } from '../types';
 import { DuplicateCustomerError, findDuplicateCustomers } from '../utils/customerDuplicates';
+import { initialBarbers, initialServices, initialPackages } from './localDefaults';
+import { newUuid, isUuid } from '../utils/uuid';
 
-type PendingMutationType =
-  | 'service:add'
-  | 'service:update'
-  | 'service:remove'
-  | 'package:add'
-  | 'package:update'
-  | 'package:remove'
-  | 'barber:add'
-  | 'barber:update'
-  | 'barber:remove'
-  | 'customer:add'
-  | 'customer:update'
-  | 'customer:remove'
-  | 'invoice:create'
-  | 'invoice:update'
-  | 'invoice:delete'
-  | 'invoice:updateStatus'
-  | 'credentials:update';
-
-interface PendingMutation {
-  id: string;
-  type: PendingMutationType;
-  payload: any;
-  createdAt: string;
+interface PendingMutation { id: string; type: string; payload: any; createdAt: string; }
+type Collection = 'barbers'|'services'|'packages'|'customers'|'invoices';
+type Operation = 'add'|'update'|'remove'|'status';
+type RecordData = (Barber|Service|ServicePackage|Customer|Invoice) & { version?: number; deleted_at?: string|null };
+export interface AppState {
+  barbers: Barber[]; services: Service[]; packages: ServicePackage[]; customers: Customer[]; invoices: Invoice[]; cart: InvoiceItem[];
+  pendingMutations: PendingMutation[]; lastSyncMessage: string|null; isSaving: boolean; remoteReady: boolean; lastVerifiedUserId: string|null; authInitializing: boolean; cacheWarning: string|null;
+  isAuthenticated: boolean; userEmail: string; userPassword: string; userId: string|null; invoiceEditPin: string;
+  addBarber: (record: Barber)=>Promise<void>; updateBarber: (record: Barber)=>Promise<void>; removeBarber: (id:string)=>Promise<void>;
+  addService: (record: Service)=>Promise<void>; updateService: (record: Service)=>Promise<void>; removeService: (id:string)=>Promise<void>;
+  addPackage: (record: ServicePackage)=>Promise<void>; updatePackage: (record: ServicePackage)=>Promise<void>; removePackage: (id:string)=>Promise<void>;
+  addCustomer: (record: Customer)=>Promise<void>; updateCustomer: (record: Customer)=>Promise<void>; removeCustomer: (id:string)=>Promise<void>;
+  createInvoice: (record: Invoice)=>Promise<void>; updateInvoice: (record: Invoice)=>Promise<void>; deleteInvoice: (id:string)=>Promise<void>;
+  updateInvoiceStatus: (id:string,status:Invoice['status'])=>Promise<void>;
+  reorderServices: (from:number,to:number)=>void; reorderPackages: (from:number,to:number)=>void;
+  addToCart: (item:InvoiceItem)=>void; removeFromCart: (index:number)=>void; clearCart: ()=>void;
+  login: (email:string,password:string)=>Promise<boolean>; logout: ()=>void;
+  updateCredentials: (email:string,password:string)=>Promise<void>;
+  verifyInvoicePin: (pin:string,id?:string,action?:'edit'|'delete')=>Promise<boolean>;
+  updateInvoicePin: (current:string,next:string)=>Promise<boolean>;
+  syncData: ()=>Promise<void>; flushPendingMutations: ()=>Promise<void>; enqueuePendingMutation:(mutation:PendingMutation)=>void;
 }
-
-const uuid = () => {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
+const scope = supabase ? new URL(import.meta.env.VITE_SUPABASE_URL).host : '';
+const STORAGE_KEY = supabase ? `vistasaloon-production-v2:${scope}` : isDemoMode ? 'vistasaloon-demo-storage-v1' : 'vistasaloon-basic-storage';
+const SIGNED_OUT_KEY=`vistasaloon-signed-out:${scope}`;
+const emptyData = { barbers: [], services: [], packages: [], customers: [], invoices: [] };
+let authEpoch=0;
+let cacheUnavailable=false;
+let restoringAuth=false;
+let minimumRevision=0;
+let snapshotRevision=-1;
+let staleReadRetries=0;
+let syncPromise:Promise<void>|null=null;
+let mutationChain:Promise<unknown>=Promise.resolve();
+const approvals=new Map<string,string>();
+const message=(error:any)=>{
+  if(error?.code==='NETWORK') return 'The server save could not be confirmed. Your draft is kept. Reconnect and retry.';
+  if (error?.code==='40001') return 'This record changed on another device. Review the refreshed data before retrying.';
+  if (error?.code==='P0002') return 'This record was removed on another device. It has not been recreated.';
+  if (['PGRST202','42883','42P01'].includes(error?.code)) return 'Finish the production database migrations before using this workspace.';
+  return typeof error?.message==='string' && !/fetch|network|connection/i.test(error.message) ? error.message : 'The server save could not be confirmed. Your draft is kept. Reconnect and retry.';
+};
+const assertOnline=()=>{ if(typeof navigator!=='undefined'&&!navigator.onLine) throw new Error('Reconnect to save. Your current draft is kept on this device.'); };
+function decodeSnapshot(data:any) {
+  if(!data || !Number.isSafeInteger(Number(data.revision))) throw new Error('Incomplete server snapshot. Cached data has been kept.');
+  for(const key of ['barbers','services','packages','customers','invoices'] as const) {
+    if(!Array.isArray(data[key]) || data[key].some((row:any)=>!row||!isUuid(row.id)||!Number.isSafeInteger(Number(row.version)))) throw new Error('Invalid server data. Cached data has been kept.');
+    if(new Set(data[key].map((row:any)=>row.id)).size!==data[key].length) throw new Error('Duplicate server IDs. Cached data has been kept.');
   }
-  return Math.random().toString(36).slice(2);
-};
-
-const isNavigatorOffline = () => {
-  if (typeof navigator === 'undefined') return false;
-  return navigator.onLine === false;
-};
-
-const isLikelyOfflineError = (error: any) => {
-  if (isNavigatorOffline()) return true;
-  if (!error) return false;
-  const message = typeof error === 'string' ? error : error?.message;
-  if (!message) return false;
-  const lower = message.toLowerCase();
-  return lower.includes('fetch') || lower.includes('network') || lower.includes('connection');
-};
-
-const STORAGE_KEY = isDemoMode ? 'vistasaloon-demo-storage-v1' : 'vistasaloon-basic-storage';
-
-interface AppState {
-  barbers: Barber[];
-  services: Service[];
-  packages: ServicePackage[];
-  customers: Customer[];
-  invoices: Invoice[];
-  cart: InvoiceItem[];
-  pendingMutations: PendingMutation[];
-  lastSyncMessage: string | null;
-  
-  // Actions
-  addBarber: (barber: Barber) => Promise<void>;
-  updateBarber: (barber: Barber) => Promise<void>;
-  removeBarber: (id: string) => Promise<void>;
-  
-  addService: (service: Service) => Promise<void>;
-  updateService: (service: Service) => Promise<void>;
-  removeService: (id: string) => Promise<void>;
-  reorderServices: (fromIndex: number, toIndex: number) => void;
-
-  addPackage: (pkg: ServicePackage) => Promise<void>;
-  updatePackage: (pkg: ServicePackage) => Promise<void>;
-  removePackage: (id: string) => Promise<void>;
-  reorderPackages: (fromIndex: number, toIndex: number) => void;
-  
-  addCustomer: (customer: Customer) => Promise<void>;
-  updateCustomer: (customer: Customer) => Promise<void>;
-  removeCustomer: (id: string) => Promise<void>;
-  
-  addToCart: (item: InvoiceItem) => void;
-  removeFromCart: (index: number) => void;
-  clearCart: () => void;
-  
-  createInvoice: (invoice: Invoice) => Promise<void>;
-  updateInvoiceStatus: (id: string, status: 'paid' | 'pending' | 'cancelled') => Promise<void>;
-  deleteInvoice: (id: string) => Promise<void>;
-  updateInvoice: (invoice: Invoice) => Promise<void>;
-  
-  // Auth
-  isAuthenticated: boolean;
-  userEmail: string;
-  userPassword: string;
-  userId: string | null;
-  login: (email: string, password: string) => Promise<boolean>;
-  logout: () => void;
-  updateCredentials: (email: string, password: string) => Promise<void>;
-
-  // Protected invoice edit PIN
-  invoiceEditPin: string;
-  verifyInvoicePin: (pin: string) => boolean;
-  updateInvoicePin: (current: string, next: string) => Promise<boolean>;
-
-  // Sync (placeholder for now)
-  syncData: () => Promise<void>;
-  enqueuePendingMutation: (mutation: PendingMutation) => void;
-  flushPendingMutations: () => Promise<void>;
+  for(const collection of ['barbers','services','packages','customers'] as const){
+    if(data[collection].some((row:any)=>typeof row.name!=='string'))throw new Error('Invalid catalog data. Cached records have been kept.');
+  }
+  if(data.packages.some((row:any)=>!Array.isArray(row.services)) || data.invoices.some((row:any)=>!Array.isArray(row.items)||!Number.isFinite(Number(row.total))||!Number.isFinite(Date.parse(row.date))||row.items.some((item:any)=>!item||typeof item.serviceName!=='string'||!Number.isFinite(Number(item.price)))))throw new Error('Invalid invoice/deal data. Cached records have been kept; ask an administrator to inspect the source records.');
+  return {barbers:data.barbers,services:data.services,packages:data.packages,customers:data.customers,invoices:data.invoices};
 }
-
-const initialBarbers: Barber[] = [
-  { id: '1', name: 'Stylist 01', active: true, commissionRate: 0 },
-  { id: '2', name: 'Stylist 02', active: true, commissionRate: 0 },
-  { id: '3', name: 'Stylist 03', active: true, commissionRate: 0 },
-  { id: '4', name: 'Stylist 04', active: true, commissionRate: 0 },
-];
-
-const initialServices: Service[] = [
-  // Hair Cut
-  { id: 'hc-1', name: 'Hair Cut - Regular', price: 400, active: true },
-  { id: 'hc-2', name: 'Hair Cut - Kids', price: 400, active: true },
-  { id: 'hc-3', name: 'Hair Cut - Fade', price: 600, active: true },
-  
-  // Beard Cut
-  { id: 'bc-1', name: 'Beard Cut - Trim', price: 300, active: true },
-  { id: 'bc-2', name: 'Beard Cut - Fade', price: 350, active: true },
-  { id: 'bc-3', name: 'Beard Cut - Clean', price: 300, active: true },
-  
-  // Waxing
-  { id: 'wx-1', name: 'Waxing - Full Face', price: 600, active: true },
-  { id: 'wx-2', name: 'Waxing - Cheeks', price: 200, active: true },
-  { id: 'wx-3', name: 'Waxing - Nose', price: 200, active: true },
-  { id: 'wx-4', name: 'Waxing - Ear', price: 200, active: true },
-  
-  // Massage
-  { id: 'ms-1', name: 'Massage - Head', price: 300, active: true },
-  { id: 'ms-2', name: 'Massage - Half Body', price: 600, active: true },
-  { id: 'ms-3', name: 'Massage - Full Body', price: 1000, active: true },
-  
-  // Hair Color
-  { id: 'clr-1', name: 'Hair Color - Head Keune', price: 1500, active: true },
-  { id: 'clr-2', name: 'Hair Color - Beard Keune', price: 700, active: true },
-  { id: 'clr-3', name: 'Hair Color - Head Eletik', price: 800, active: true },
-  { id: 'clr-4', name: 'Hair Color - Beard Eletik', price: 400, active: true },
-  { id: 'clr-5', name: 'Hair Color - Head Service', price: 250, active: true },
-  { id: 'clr-6', name: 'Hair Color - Beard Service', price: 150, active: true },
-  
-  // Others
-  { id: 'oth-1', name: 'Hair Polish', price: 1000, active: true },
-  { id: 'oth-2', name: 'Head Wash', price: 250, active: true },
-  
-  // Facial
-  { id: 'fac-1', name: 'Facial - Nature Life', price: 4500, active: true },
-  { id: 'fac-2', name: 'Facial - Derma Shine', price: 3000, active: true },
-  { id: 'fac-3', name: 'Facial - Dr Rashiel', price: 2500, active: true },
-  { id: 'fac-4', name: 'Facial - Cleansing', price: 1000, active: true },
-];
-
-const initialPackages: ServicePackage[] = [
-  {
-    id: 'pkg-groom-basic',
-    name: 'Gentlemen Starter',
-    price: 1200,
-    services: ['Hair Cut - Regular', 'Beard Cut - Trim', 'Head Wash'],
-    active: true,
-  },
-  {
-    id: 'pkg-groom-premium',
-    name: 'Signature Glow',
-    price: 2800,
-    services: ['Hair Cut - Fade', 'Beard Cut - Fade', 'Facial - Cleansing', 'Massage - Head'],
-    active: true,
-  },
-  {
-    id: 'pkg-color-relax',
-    name: 'Color & Relax',
-    price: 3200,
-    services: ['Hair Color - Head Keune', 'Head Wash', 'Massage - Head'],
-    active: true,
-  },
-];
-
-export const useStore = create<AppState>()(
-  persist(
-    (set, get) => {
-      const enqueuePendingMutationInternal = (mutation: PendingMutation) => {
-        set((state) => ({
-          pendingMutations: [...state.pendingMutations, mutation],
-          lastSyncMessage: `Pending sync (${state.pendingMutations.length + 1})`,
-        }));
-        console.warn('[OfflineQueue] Queued mutation', mutation.type, mutation.payload);
-      };
-
-      const queueMutation = (type: PendingMutationType, payload: any) => {
-        const mutation: PendingMutation = {
-          id: uuid(),
-          type,
-          payload,
-          createdAt: new Date().toISOString(),
-        };
-        enqueuePendingMutationInternal(mutation);
-        return mutation;
-      };
-
-      const runOrQueue = async (
-        type: PendingMutationType,
-        payload: any,
-        executor: () => Promise<void>,
-        rollback?: () => void
-      ) => {
-        if (!supabase) {
-          queueMutation(type, payload);
-          return false;
-        }
-        try {
-          await executor();
-          return true;
-        } catch (error) {
-          if (isLikelyOfflineError(error)) {
-            queueMutation(type, payload);
-            return false;
-          }
-          if (rollback) rollback();
-          throw error;
-        }
-      };
-
-      const fetchValidServiceIds = async (items: InvoiceItem[]) => {
-        if (!supabase) return new Set<string>();
-        const serviceIds = Array.from(new Set(items.map((item) => item.serviceId).filter(Boolean)));
-        if (!serviceIds.length) return new Set<string>();
-
-        const { data, error } = await supabase.from('services').select('id').in('id', serviceIds);
-        if (error) throw error;
-
-        return new Set((data ?? []).map((service: { id: string }) => service.id));
-      };
-
-      const buildInvoiceItemsPayload = async (invoice: Invoice) => {
-        const validServiceIds = await fetchValidServiceIds(invoice.items);
-
-        return invoice.items.map((item: InvoiceItem, idx: number) => ({
-          invoiceId: invoice.id,
-          serviceId: item.serviceId && validServiceIds.has(item.serviceId) ? item.serviceId : null,
-          serviceName: item.serviceName,
-          price: item.price,
-          barberId: item.barberId || null,
-          barberName: item.barberName,
-          position: idx,
-        }));
-      };
-
-      const executePendingMutation = async (mutation: PendingMutation) => {
-        if (!supabase) throw new Error('Supabase client not configured');
-        switch (mutation.type) {
-          case 'service:add': {
-            const { service } = mutation.payload;
-            const { error } = await supabase.from('services').upsert(service);
-            if (error) throw error;
-            return;
-          }
-          case 'service:update': {
-            const { service } = mutation.payload;
-            const { error } = await supabase.from('services').upsert(service);
-            if (error) throw error;
-            return;
-          }
-          case 'service:remove': {
-            const { id } = mutation.payload;
-            const { error: deleteError } = await supabase.from('services').update({ active: false }).eq('id', id);
-            if (deleteError) throw deleteError;
-            return;
-          }
-          case 'package:add':
-          case 'package:update': {
-            const { pkg } = mutation.payload;
-            const { error } = await supabase
-              .from('service_packages')
-              .upsert({ id: pkg.id, name: pkg.name, price: pkg.price, active: pkg.active ?? true });
-            if (error) throw error;
-            await supabase.from('service_package_items').delete().eq('packageId', pkg.id);
-            const itemsPayload = pkg.services.map((name: string, idx: number) => ({
-              packageId: pkg.id,
-              serviceName: name,
-              position: idx,
-            }));
-            if (itemsPayload.length) {
-              const { error: itemsError } = await supabase.from('service_package_items').insert(itemsPayload);
-              if (itemsError) throw itemsError;
-            }
-            return;
-          }
-          case 'package:remove': {
-            const { id } = mutation.payload;
-            const { error: itemsError } = await supabase.from('service_package_items').delete().eq('packageId', id);
-            if (itemsError) throw itemsError;
-            const { error } = await supabase.from('service_packages').delete().eq('id', id);
-            if (error) throw error;
-            return;
-          }
-          case 'barber:add':
-          case 'barber:update': {
-            const { barber } = mutation.payload;
-            const { error } = await supabase.from('barbers').upsert(barber);
-            if (error) throw error;
-            return;
-          }
-          case 'barber:remove': {
-            const { id } = mutation.payload;
-            const { error } = await supabase.from('barbers').update({ active: false }).eq('id', id);
-            if (error) throw error;
-            return;
-          }
-          case 'customer:add':
-          case 'customer:update': {
-            const { customer } = mutation.payload;
-            const { error } = await supabase.from('customers').upsert(customer);
-            if (error) throw error;
-            return;
-          }
-          case 'customer:remove': {
-            const { id } = mutation.payload;
-            const { error } = await supabase.from('customers').update({ active: false }).eq('id', id);
-            if (error) throw error;
-            return;
-          }
-          case 'invoice:create': {
-            const { invoice, customer, barberRows } = mutation.payload;
-            const tasks: PromiseLike<any>[] = [];
-            if (customer) tasks.push(supabase.from('customers').upsert(customer));
-            if (barberRows?.length) tasks.push(supabase.from('barbers').upsert(barberRows));
-            const results = await Promise.all(tasks);
-            for (const r of results) {
-              if (r?.error) throw r.error;
-            }
-            const itemsPayload = await buildInvoiceItemsPayload(invoice);
-            const { error: rpcError } = await supabase.rpc('create_invoice_with_items', {
-              invoice_data: invoice,
-              items_data: itemsPayload,
-            });
-            if (rpcError) throw rpcError;
-            return;
-          }
-          case 'invoice:update': {
-            const { invoice, customer, barberRows } = mutation.payload;
-            const tasks: PromiseLike<any>[] = [];
-            if (customer) tasks.push(supabase.from('customers').upsert(customer));
-            if (barberRows?.length) tasks.push(supabase.from('barbers').upsert(barberRows));
-            const results = await Promise.all(tasks);
-            for (const r of results) {
-              if (r?.error) throw r.error;
-            }
-            const itemsPayload = await buildInvoiceItemsPayload(invoice);
-            const { error: rpcError } = await supabase.rpc('update_invoice_with_items', {
-              invoice_data: invoice,
-              items_data: itemsPayload,
-            });
-            if (rpcError) throw rpcError;
-            return;
-          }
-          case 'invoice:delete': {
-            const { id } = mutation.payload;
-            const { error } = await supabase.from('invoices').delete().eq('id', id);
-            if (error) throw error;
-            return;
-          }
-          case 'invoice:updateStatus': {
-            const { id, status } = mutation.payload;
-            const { error } = await supabase.from('invoices').update({ status }).eq('id', id);
-            if (error) throw error;
-            return;
-          }
-          case 'credentials:update': {
-            const { user } = mutation.payload;
-            if (!supabase) throw new Error('Supabase client not configured');
-            let userId = user.id ?? undefined;
-            if (!userId) {
-              const { data: existing, error: fetchError } = await supabase
-                .from('app_users')
-                .select('id')
-                .order('createdAt', { ascending: false })
-                .limit(1)
-                .maybeSingle();
-              if (fetchError) throw fetchError;
-              userId = existing?.id ?? undefined;
-            }
-            const payload = {
-              id: userId,
-              email: user.email,
-              password: user.password,
-              role: 'admin',
-              active: true,
-              pin: user.pin,
-            };
-            const { error, data } = await supabase.from('app_users').upsert(payload).select().single();
-            if (error) throw error;
-            set({
-              userId: data?.id ?? userId ?? null,
-              userEmail: user.email,
-              userPassword: user.password,
-              invoiceEditPin: user.pin,
-            });
-            return;
-          }
-          default:
-            console.warn('[OfflineQueue] Unknown mutation type', mutation.type);
-        }
-      };
-
-      const flushPendingMutations = async () => {
-        const queued = get().pendingMutations;
-        if (!queued.length) {
-          set({ lastSyncMessage: null });
-          return;
-        }
-        if (!supabase) {
-          set({ lastSyncMessage: `Waiting for connection (${queued.length})` });
-          return;
-        }
-        set({ lastSyncMessage: `Syncing ${queued.length} pending change${queued.length === 1 ? '' : 's'}...` });
-        while (true) {
-          const next = get().pendingMutations[0];
-          if (!next) break;
-          try {
-            await executePendingMutation(next);
-            set((state) => ({
-              pendingMutations: state.pendingMutations.filter((m) => m.id !== next.id),
-            }));
-          } catch (error) {
-            if (isLikelyOfflineError(error)) {
-              set({ lastSyncMessage: `Waiting for connection (${get().pendingMutations.length})` });
-              return;
-            }
-            set({ lastSyncMessage: 'Sync failed' });
-            if (error instanceof Error) throw error;
-            throw new Error('Failed to sync pending changes.');
-          }
-        }
-        set({ lastSyncMessage: 'All changes synced' });
-      };
-
-      return {
-      barbers: initialBarbers,
-      services: initialServices,
-      packages: initialPackages,
-      customers: [],
-      invoices: [],
-      cart: [],
-      isAuthenticated: false,
-      userEmail: 'admin@vistasaloon.local',
-      userPassword: 'VistaLocal123!',
-      userId: null,
-      invoiceEditPin: '9999',
-      pendingMutations: [],
-      lastSyncMessage: null,
-
-      addBarber: async (barber) => {
-        const previousBarbers = get().barbers;
-        set({ barbers: [...previousBarbers, barber] });
-        const rollback = () => set({ barbers: previousBarbers });
-        try {
-          await runOrQueue('barber:add', { barber }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase.from('barbers').upsert(barber);
-            if (error) throw error;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to add barber. Please try again.');
-        }
-      },
-      updateBarber: async (updated) => {
-        const previousBarbers = get().barbers;
-        set({
-          barbers: previousBarbers.map((b) => (b.id === updated.id ? updated : b)),
-        });
-        const rollback = () => set({ barbers: previousBarbers });
-        try {
-          await runOrQueue('barber:update', { barber: updated }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase.from('barbers').upsert(updated);
-            if (error) throw error;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to update barber. Please try again.');
-        }
-      },
-      removeBarber: async (id) => {
-        const { barbers: previousBarbers } = get();
-        set({
-          barbers: previousBarbers.map((b) => (b.id === id ? { ...b, active: false } : b)),
-        });
-        const rollback = () => set({ barbers: previousBarbers });
-        try {
-          await runOrQueue('barber:remove', { id }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error: deleteError } = await supabase.from('barbers').update({ active: false }).eq('id', id);
-            if (deleteError) throw deleteError;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to remove barber. Please try again.');
-        }
-      },
-
-      addService: async (service) => {
-        const previousServices = get().services;
-        set({ services: [...previousServices, service] });
-        const rollback = () => set({ services: previousServices });
-        try {
-          await runOrQueue('service:add', { service }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase.from('services').upsert(service);
-            if (error) throw error;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to add service. Please try again.');
-        }
-      },
-      updateService: async (updated) => {
-        const previousServices = get().services;
-        set({
-          services: previousServices.map((s) => (s.id === updated.id ? updated : s)),
-        });
-        const rollback = () => set({ services: previousServices });
-        try {
-          await runOrQueue('service:update', { service: updated }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase.from('services').upsert(updated);
-            if (error) throw error;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to update service. Please try again.');
-        }
-      },
-      removeService: async (id) => {
-        const { services: previousServices } = get();
-        set({
-          services: previousServices.map((s) => (s.id === id ? { ...s, active: false } : s)),
-        });
-        const rollback = () => set({ services: previousServices });
-        try {
-          await runOrQueue('service:remove', { id }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error: deleteError } = await supabase.from('services').update({ active: false }).eq('id', id);
-            if (deleteError) throw deleteError;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to remove service. Please try again.');
-        }
-      },
-
-      reorderServices: (fromIndex, toIndex) => set((state) => {
-        const newServices = [...state.services];
-        const [movedItem] = newServices.splice(fromIndex, 1);
-        newServices.splice(toIndex, 0, movedItem);
-        return { services: newServices };
-      }),
-
-      addPackage: async (pkg) => {
-        const previousPackages = get().packages;
-        set({ packages: [...previousPackages, pkg] });
-        const rollback = () => set({ packages: previousPackages });
-        try {
-          await runOrQueue('package:add', { pkg }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase
-              .from('service_packages')
-              .upsert({ id: pkg.id, name: pkg.name, price: pkg.price, active: pkg.active ?? true });
-            if (error) throw error;
-
-            await supabase.from('service_package_items').delete().eq('packageId', pkg.id);
-            const itemsPayload = pkg.services.map((name, idx) => ({
-              packageId: pkg.id,
-              serviceName: name,
-              position: idx,
-            }));
-            if (itemsPayload.length) {
-              const { error: itemsError } = await supabase.from('service_package_items').insert(itemsPayload);
-              if (itemsError) throw itemsError;
-            }
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to add package. Please try again.');
-        }
-      },
-
-      updatePackage: async (pkg) => {
-        const previousPackages = get().packages;
-        set({
-          packages: previousPackages.map((p) => (p.id === pkg.id ? pkg : p)),
-        });
-        const rollback = () => set({ packages: previousPackages });
-        try {
-          await runOrQueue('package:update', { pkg }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase
-              .from('service_packages')
-              .upsert({ id: pkg.id, name: pkg.name, price: pkg.price, active: pkg.active ?? true });
-            if (error) throw error;
-
-            await supabase.from('service_package_items').delete().eq('packageId', pkg.id);
-            const itemsPayload = pkg.services.map((name, idx) => ({
-              packageId: pkg.id,
-              serviceName: name,
-              position: idx,
-            }));
-            if (itemsPayload.length) {
-              const { error: itemsError } = await supabase.from('service_package_items').insert(itemsPayload);
-              if (itemsError) throw itemsError;
-            }
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to update package. Please try again.');
-        }
-      },
-
-      removePackage: async (id) => {
-        const previousPackages = get().packages;
-        set({ packages: previousPackages.filter((p) => p.id !== id) });
-        const rollback = () => set({ packages: previousPackages });
-        try {
-          await runOrQueue('package:remove', { id }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error: itemsError } = await supabase.from('service_package_items').delete().eq('packageId', id);
-            if (itemsError) throw itemsError;
-            const { error: deleteError } = await supabase.from('service_packages').delete().eq('id', id);
-            if (deleteError) throw deleteError;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to remove package. Please try again.');
-        }
-      },
-
-      reorderPackages: (fromIndex, toIndex) => set((state) => {
-        const next = [...state.packages];
-        const [moved] = next.splice(fromIndex, 1);
-        next.splice(toIndex, 0, moved);
-        return { packages: next };
-      }),
-
-      addCustomer: async (customer) => {
-        const previousCustomers = get().customers;
-        const duplicates = findDuplicateCustomers(previousCustomers, customer);
-        if (duplicates.length) {
-          throw new DuplicateCustomerError(duplicates);
-        }
-
-        set({ customers: [...previousCustomers, customer] });
-        const rollback = () => set({ customers: previousCustomers });
-        try {
-          await runOrQueue('customer:add', { customer }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase.from('customers').upsert(customer);
-            if (error) throw error;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to add customer. Please try again.');
-        }
-      },
-      updateCustomer: async (updated) => {
-        const previousCustomers = get().customers;
-        const duplicates = findDuplicateCustomers(previousCustomers, updated, updated.id);
-        if (duplicates.length) {
-          throw new DuplicateCustomerError(duplicates);
-        }
-
-        set({
-          customers: previousCustomers.map((c) => (c.id === updated.id ? updated : c)),
-        });
-        const rollback = () => set({ customers: previousCustomers });
-        try {
-          await runOrQueue('customer:update', { customer: updated }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase.from('customers').upsert(updated);
-            if (error) throw error;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to update customer. Please try again.');
-        }
-      },
-
-      removeCustomer: async (id) => {
-        const { customers: previousCustomers } = get();
-        set({
-          customers: previousCustomers.map((c) => (c.id === id ? { ...c, active: false } : c)),
-        });
-        const rollback = () => set({ customers: previousCustomers });
-        try {
-          await runOrQueue('customer:remove', { id }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase.from('customers').update({ active: false }).eq('id', id);
-            if (error) throw error;
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to remove customer. Please try again.');
-        }
-      },
-
-      addToCart: (item) => set((state) => ({ cart: [...state.cart, item] })),
-      removeFromCart: (index) => set((state) => ({
-        cart: state.cart.filter((_, i) => i !== index),
-      })),
-      clearCart: () => set({ cart: [] }),
-
-      createInvoice: async (invoice) => {
-        const previousInvoices = get().invoices;
-        set({ invoices: [invoice, ...previousInvoices] });
-        const state = get();
-
-        const customer = invoice.customerId
-          ? state.customers.find((c) => c.id === invoice.customerId)
-          : null;
-
-        // Ensure referenced records exist to satisfy FKs
-        const lineBarbers = Array.from(
-          new Map(
-            invoice.items.map((i) => [i.barberId, i])
-          ).values()
-        ).filter((i) => i.barberId);
-
-        const barberRows = lineBarbers.map((i) => {
-          const existing = state.barbers.find((b) => b.id === i.barberId);
-          return {
-            id: i.barberId,
-            name: i.barberName,
-            active: existing?.active ?? true,
-            commissionRate: existing?.commissionRate ?? 0,
-          } as Barber;
-        });
-
-        const rollback = () => set({ invoices: previousInvoices });
-        const payload = { invoice, customer, barberRows };
-        try {
-          await runOrQueue('invoice:create', payload, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const tasks: PromiseLike<any>[] = [];
-            if (customer) tasks.push(supabase.from('customers').upsert(customer));
-            if (barberRows.length) tasks.push(supabase.from('barbers').upsert(barberRows));
-
-            const results = await Promise.all(tasks);
-            for (const r of results) {
-              if (r?.error) {
-                const details = r.error?.message;
-                throw new Error(details ? `Failed to sync related records: ${details}` : 'Failed to sync related records before saving invoice.');
-              }
-            }
-
-            const { error: invError } = await supabase.from('invoices').insert(invoice);
-            if (invError) throw new Error(invError.message || 'Failed to save invoice.');
-
-            const itemsPayload = await buildInvoiceItemsPayload(invoice);
-
-            if (itemsPayload.length) {
-              const { error: itemsError } = await supabase.from('invoice_items').insert(itemsPayload);
-              if (itemsError) throw new Error(itemsError.message || 'Failed to save invoice line items.');
-            }
-          }, rollback);
-        } catch (error) {
-          if (error instanceof Error) throw error;
-          throw new Error('Failed to save invoice.');
-        }
-      },
-
-      updateInvoiceStatus: async (id, status) => {
-        const previousInvoices = get().invoices;
-        set({
-          invoices: previousInvoices.map((inv) =>
-            inv.id === id ? { ...inv, status } : inv
-          ),
-        });
-        const rollback = () => set({ invoices: previousInvoices });
-        try {
-          await runOrQueue('invoice:updateStatus', { id, status }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase
-              .from('invoices')
-              .update({ status })
-              .eq('id', id);
-            if (error) throw new Error(error.message || 'Failed to update invoice status.');
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to update invoice status.');
-        }
-      },
-
-      deleteInvoice: async (id) => {
-        const previousInvoices = get().invoices;
-        set({
-          invoices: previousInvoices.filter((inv) => inv.id !== id),
-        });
-        const rollback = () => set({ invoices: previousInvoices });
-        try {
-          await runOrQueue('invoice:delete', { id }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const { error } = await supabase
-              .from('invoices')
-              .delete()
-              .eq('id', id);
-            if (error) throw new Error(error.message || 'Failed to delete invoice.');
-          }, rollback);
-        } catch (error) {
-          throw new Error(error instanceof Error ? error.message : 'Failed to delete invoice.');
-        }
-      },
-
-      updateInvoice: async (invoice) => {
-        const previousInvoices = get().invoices;
-        set({
-          invoices: previousInvoices.map((inv) => (inv.id === invoice.id ? invoice : inv)),
-        });
-        const state = get();
-        const customer = invoice.customerId
-          ? state.customers.find((c) => c.id === invoice.customerId)
-          : null;
-
-        const lineBarbers = Array.from(new Map(invoice.items.map((i) => [i.barberId, i])).values()).filter((i) => i.barberId);
-
-        const barberRows = lineBarbers.map((i) => {
-          const existing = state.barbers.find((b) => b.id === i.barberId);
-          return {
-            id: i.barberId,
-            name: i.barberName,
-            active: existing?.active ?? true,
-            commissionRate: existing?.commissionRate ?? 0,
-          } as Barber;
-        });
-        const rollback = () => set({ invoices: previousInvoices });
-        const payload = { invoice, customer, barberRows };
-        try {
-          await runOrQueue('invoice:update', payload, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            const tasks: PromiseLike<any>[] = [];
-            if (customer) tasks.push(supabase.from('customers').upsert(customer));
-            if (barberRows.length) tasks.push(supabase.from('barbers').upsert(barberRows));
-
-            const preResults = await Promise.all(tasks);
-            for (const r of preResults) {
-              if (r?.error) {
-                const details = r.error?.message;
-                throw new Error(details ? `Failed to sync related records: ${details}` : 'Failed to sync related records before updating invoice.');
-              }
-            }
-
-            const { error: invError } = await supabase.from('invoices').upsert(invoice);
-            if (invError) throw new Error(invError.message || 'Failed to update invoice.');
-
-            const deleteItemsResult = await supabase.from('invoice_items').delete().eq('invoiceId', invoice.id);
-            if (deleteItemsResult.error) throw new Error(deleteItemsResult.error.message || 'Failed to update invoice line items.');
-
-            const itemsPayload = await buildInvoiceItemsPayload(invoice);
-
-            if (itemsPayload.length) {
-              const { error: itemsError } = await supabase.from('invoice_items').insert(itemsPayload);
-              if (itemsError) throw new Error(itemsError.message || 'Failed to update invoice line items.');
-            }
-          }, rollback);
-        } catch (error) {
-          if (error instanceof Error) throw error;
-          throw new Error('Failed to update invoice.');
-        }
-      },
-
-      login: async (email, password) => {
-        const state = get();
-
-        if (supabase) {
-          const { data, error } = await supabase
-            .from('app_users')
-            .select('*')
-            .order('createdAt', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
-          if (error) {
-            console.error('[Supabase] login fetch failed:', error);
-          }
-
-          if (data) {
-            set({
-              userId: data.id,
-              userEmail: data.email,
-              userPassword: data.password,
-              invoiceEditPin: data.pin ?? state.invoiceEditPin,
-            });
-
-            if (email === data.email && password === data.password) {
-              set({ isAuthenticated: true });
-              return true;
-            }
-            return false;
-          }
-        }
-
-        if (email === state.userEmail && password === state.userPassword) {
-          set({ isAuthenticated: true });
-          return true;
-        }
-        return false;
-      },
-
-      logout: () => set({ isAuthenticated: false }),
-
-      updateCredentials: async (email, password) => {
-        const state = get();
-        const previous = { userEmail: state.userEmail, userPassword: state.userPassword, userId: state.userId };
-        set({ userEmail: email, userPassword: password });
-        const rollback = () => set({ userEmail: previous.userEmail, userPassword: previous.userPassword, userId: previous.userId });
-        const payloadUser = {
-          id: state.userId ?? undefined,
-          email,
-          password,
-          pin: state.invoiceEditPin,
-        };
-
-        try {
-          await runOrQueue('credentials:update', { user: payloadUser }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            let userId = payloadUser.id;
-            if (!userId) {
-              const { data: existing, error: fetchError } = await supabase
-                .from('app_users')
-                .select('id')
-                .order('createdAt', { ascending: false })
-                .limit(1)
-                .maybeSingle();
-              if (fetchError) throw fetchError;
-              userId = existing?.id ?? undefined;
-            }
-
-            const payload = { id: userId, email, password, role: 'admin', active: true, pin: state.invoiceEditPin };
-            const { error, data } = await supabase.from('app_users').upsert(payload).select().single();
-            if (error) throw error;
-            if (data?.id) {
-              set({ userId: data.id, userEmail: data.email, userPassword: data.password, invoiceEditPin: data.pin ?? state.invoiceEditPin });
-            }
-          }, rollback);
-        } catch (error) {
-          rollback();
-          const message = error instanceof Error ? error.message : 'Failed to update credentials. Please try again.';
-          throw new Error(message);
-        }
-      },
-
-      verifyInvoicePin: (pin) => get().invoiceEditPin === pin,
-
-      updateInvoicePin: async (current, next) => {
-        const state = get();
-        if (current !== state.invoiceEditPin) return false;
-        const previousPin = state.invoiceEditPin;
-        set({ invoiceEditPin: next });
-        const rollback = () => set({ invoiceEditPin: previousPin });
-        const payloadUser = {
-          id: state.userId ?? undefined,
-          email: state.userEmail,
-          password: state.userPassword,
-          pin: next,
-        };
-
-        try {
-          await runOrQueue('credentials:update', { user: payloadUser }, async () => {
-            if (!supabase) throw new Error('Supabase unavailable');
-            let userId = payloadUser.id;
-            if (!userId) {
-              const { data: existing, error: fetchError } = await supabase
-                .from('app_users')
-                .select('id')
-                .order('createdAt', { ascending: false })
-                .limit(1)
-                .maybeSingle();
-              if (fetchError) throw fetchError;
-              userId = existing?.id ?? undefined;
-            }
-
-            const payload = {
-              id: userId,
-              email: state.userEmail,
-              password: state.userPassword,
-              role: 'admin',
-              active: true,
-              pin: next,
-            };
-
-            const { error, data } = await supabase.from('app_users').upsert(payload).select().single();
-            if (error) throw error;
-            if (data?.id) {
-              set({ userId: data.id, userEmail: data.email, userPassword: data.password, invoiceEditPin: data.pin });
-            }
-          }, rollback);
-          return true;
-        } catch (error) {
-          rollback();
-          const message = error instanceof Error ? error.message : 'Failed to update invoice PIN. Please try again.';
-          throw new Error(message);
-        }
-      },
-
-      syncData: async () => {
-        await flushPendingMutations().catch((error) => {
-          console.warn('[OfflineQueue] flush before sync failed:', error);
-        });
-        if (!supabase) return;
-
-        const [barbersRes, servicesRes, packagesRes, packageItemsRes, customersRes, invoicesRes, usersRes] = await Promise.all([
-          supabase.from('barbers').select('*'),
-          supabase.from('services').select('*'),
-          supabase.from('service_packages').select('*'),
-          supabase.from('service_package_items').select('*').order('position', { ascending: true }),
-          supabase.from('customers').select('*'),
-          supabase.from('invoices').select('*').order('createdAt', { ascending: false }).limit(10000),
-          supabase.from('app_users').select('*').order('createdAt', { ascending: false }).limit(1),
-        ]);
-
-        const anyError = barbersRes.error || servicesRes.error || packagesRes.error || packageItemsRes.error || customersRes.error || invoicesRes.error || usersRes.error;
-        if (anyError) {
-          console.error('[Supabase] syncData failed:', anyError);
-          return;
-        }
-
-        // Seed defaults if tables are empty
-        if ((barbersRes.data?.length ?? 0) === 0) {
-          await supabase.from('barbers').upsert(initialBarbers);
-          barbersRes.data = initialBarbers;
-        }
-
-        let packagesData = packagesRes.data ?? [];
-        if ((packagesData.length ?? 0) === 0) {
-          // seed packages and items
-          await supabase.from('service_packages').upsert(initialPackages.map((p) => ({
-            id: p.id,
-            name: p.name,
-            price: p.price,
-            active: p.active ?? true,
-          })));
-
-          const seedItems = initialPackages.flatMap((p) =>
-            p.services.map((name, idx) => ({ packageId: p.id, serviceName: name, position: idx }))
-          );
-          if (seedItems.length) {
-            await supabase.from('service_package_items').insert(seedItems);
-          }
-
-          packagesData = initialPackages as any;
-        }
-
-        const itemsByPackage = new Map<string, { serviceName: string; position: number }[]>();
-        (packageItemsRes.data ?? []).forEach((row) => {
-          const arr = itemsByPackage.get(row.packageId) ?? [];
-          arr.push({ serviceName: row.serviceName, position: row.position ?? 0 });
-          itemsByPackage.set(row.packageId, arr);
-        });
-
-        const packagesFromDb: ServicePackage[] = (packagesData ?? []).map((pkg) => {
-          const items = (itemsByPackage.get(pkg.id) ?? []).sort((a, b) => a.position - b.position);
-          return {
-            id: pkg.id,
-            name: pkg.name,
-            price: Number(pkg.price ?? 0),
-            active: pkg.active ?? true,
-            services: items.map((i) => i.serviceName),
-          } as ServicePackage;
-        });
-
-        const userRow = usersRes.data?.[0];
-
-        set(() => ({
-          barbers: barbersRes.data ?? initialBarbers,
-          services: servicesRes.data ?? initialServices,
-          packages: packagesFromDb.length ? packagesFromDb : initialPackages,
-          customers: customersRes.data ?? [],
-          invoices: invoicesRes.data ?? [],
-          userId: userRow?.id ?? null,
-          userEmail: userRow?.email ?? 'admin@vistasaloon.local',
-          userPassword: userRow?.password ?? 'VistaLocal123!',
-          invoiceEditPin: userRow?.pin ?? '9999',
-          cart: [],
-        }));
-      },
-      enqueuePendingMutation: (mutation) => enqueuePendingMutationInternal(mutation),
-      flushPendingMutations,
-      };
-    },
-    {
-      name: STORAGE_KEY,
-      partialize: (state) => ({ 
-        // Keep local workspace data across sessions.
-        barbers: state.barbers,
-        services: state.services,
-        packages: state.packages,
-        customers: state.customers,
-        invoices: state.invoices,
-        userEmail: state.userEmail,
-        userPassword: state.userPassword,
-        userId: state.userId,
-        isAuthenticated: state.isAuthenticated,
-        invoiceEditPin: state.invoiceEditPin,
-        pendingMutations: state.pendingMutations,
-        lastSyncMessage: state.lastSyncMessage
-      }),
+// Persist request IDs BEFORE sending: a timeout/reload must not create a second sale.
+function requestId(entity:Collection,operation:Operation,record:RecordData,version?:number) {
+  const key=`vistasaloon-requests:${scope}:${useStore.getState().userId}`;
+  const fingerprint=JSON.stringify([entity,operation,record,version]);
+  const entries:Record<string,string>=JSON.parse(sessionStorage.getItem(key)||'{}');
+  if(!entries[fingerprint]) {entries[fingerprint]=newUuid();sessionStorage.setItem(key,JSON.stringify(entries));}
+  return {id:entries[fingerprint],done:()=>{const current=JSON.parse(sessionStorage.getItem(key)||'{}');delete current[fingerprint];sessionStorage.setItem(key,JSON.stringify(current));}};
+}
+export const useStore=create<AppState>()(persist((set,get)=>{
+  const applyRecord=(entity:Collection,operation:Operation,record:RecordData)=>set(state=>{
+    const current=state[entity] as RecordData[];
+    if(record.deleted_at || (operation==='remove' && (entity==='invoices'||entity==='packages'))) return {[entity]:current.filter(row=>row.id!==record.id)};
+    return {[entity]:current.some(row=>row.id===record.id)?current.map(row=>row.id===record.id?record:row):entity==='invoices'?[record,...current]:[...current,record]};
+  });
+  const mutate=async(entity:Collection,operation:Operation,record:RecordData)=>{
+    if(!isUuid(record.id) && supabase) throw new Error('This record needs a valid UUID. Refresh the catalog before saving.');
+    if(!supabase) {
+      if(import.meta.env.PROD) throw new Error('Connect Supabase before using this production build.');
+      const current=(get()[entity] as RecordData[]).find(row=>row.id===record.id);
+      if(operation==='add'&&current) throw new Error('This record ID already exists.');
+      if(operation!=='add'&&!current) throw new Error('This record no longer exists.');
+      if(entity==='customers' && ['add','update'].includes(operation)) {
+        const duplicates=findDuplicateCustomers(get().customers,record as Customer,operation==='update'?record.id:undefined);
+        if(duplicates.length) throw new DuplicateCustomerError(duplicates);
+      }
+      applyRecord(entity,operation,operation==='remove'?entity==='invoices'||entity==='packages'?{...record,deleted_at:new Date().toISOString()}:{...current,...record,active:false}:operation==='status'?{...current,...record}:record);
+      return;
     }
-  )
-);
+    const epoch=authEpoch;
+    const existing=(get()[entity] as RecordData[]).find(row=>row.id===record.id);
+    const expected=operation==='add'?undefined:record.version??existing?.version;
+    const job=async()=>{
+      if(epoch!==authEpoch || !get().isAuthenticated) throw new Error('Sign in before saving.');
+      assertOnline();
+      if(!get().remoteReady) throw new Error('Refresh the workspace successfully before saving. Your draft is kept.');
+      set({isSaving:true,lastSyncMessage:'Saving...'});
+      try {
+        const journal=requestId(entity,operation,record,expected);
+        const {data,error}=await supabase!.rpc('pos_mutate',{p_request_id:journal.id,p_entity:entity,p_operation:operation,p_record:record,p_expected_version:expected??null,p_pin_token:approvals.get(`${record.id}:${operation}`)??null}).abortSignal(AbortSignal.timeout(20000));
+        if(error) throw error;
+        if(!data?.record || data.record.id!==record.id || !Number.isSafeInteger(Number(data.revision))) throw new Error('The server save could not be confirmed. Retry this same operation.');
+        if(epoch!==authEpoch) return;
+        minimumRevision=Math.max(minimumRevision,Number(data.revision));
+        if(Number(data.revision)>=snapshotRevision) applyRecord(entity,operation,data.record);
+        approvals.delete(`${record.id}:${operation}`);
+        try{journal.done();}catch{console.warn('Server save confirmed; request journal cleanup deferred.');}
+        set({lastSyncMessage:null});
+      } catch(error) {
+        if(epoch===authEpoch) {
+          set({lastSyncMessage:message(error)});
+          if((error as any)?.code==='42501'){set({remoteReady:false});}
+          if(['40001','P0002'].includes((error as any)?.code)) await get().syncData().catch(()=>{});
+        }
+        throw new Error(message(error));
+      } finally {if(epoch===authEpoch)set({isSaving:false});}
+      // Fetch other devices' changes without replacing the active cart.
+      void get().syncData().catch(()=>{});
+    };
+    const result=mutationChain.then(job,job);mutationChain=result.catch(()=>{});await result;
+  };
+  const remove=(entity:Collection,id:string)=>mutate(entity,'remove',{id} as RecordData);
+  const reorder=(entity:'services'|'packages',from:number,to:number)=>{
+    const rows=[...get()[entity]];
+    if(from<0||from>=rows.length||to<0||to>=rows.length)return;
+    const [row]=rows.splice(from,1); rows.splice(to,0,row);set({[entity]:rows});
+  };
+  return {
+    ...(supabase?emptyData:{barbers:initialBarbers,services:initialServices,packages:initialPackages,customers:[],invoices:[]}),
+    cart:[],pendingMutations:[],lastSyncMessage:null,isSaving:false,remoteReady:!supabase,lastVerifiedUserId:null,authInitializing:!!supabase,cacheWarning:null,
+    isAuthenticated:false,userEmail:supabase?'':'admin@vistasaloon.local',userPassword:supabase?'':'VistaLocal123!',userId:null,invoiceEditPin:supabase?'':'9999',
+    addBarber:record=>mutate('barbers','add',record),updateBarber:record=>mutate('barbers','update',record),removeBarber:id=>remove('barbers',id),
+    addService:record=>mutate('services','add',record),updateService:record=>mutate('services','update',record),removeService:id=>remove('services',id),
+    addPackage:record=>mutate('packages','add',record),updatePackage:record=>mutate('packages','update',record),removePackage:id=>remove('packages',id),
+    addCustomer:record=>mutate('customers','add',record),updateCustomer:record=>mutate('customers','update',record),removeCustomer:id=>remove('customers',id),
+    createInvoice:record=>mutate('invoices','add',record),updateInvoice:record=>mutate('invoices','update',record),deleteInvoice:id=>remove('invoices',id),
+    updateInvoiceStatus:(id,status)=>mutate('invoices','status',{id,status} as Invoice),
+    reorderServices:(from,to)=>reorder('services',from,to),reorderPackages:(from,to)=>reorder('packages',from,to),
+    addToCart:item=>set(state=>({cart:[...state.cart,item]})),removeFromCart:index=>set(state=>({cart:state.cart.filter((_,i)=>i!==index)})),clearCart:()=>set({cart:[]}),
+    login:async(email,password)=>{
+      if(!supabase) {
+        if(import.meta.env.PROD) throw new Error('Connect Supabase before using this production build.');
+        const valid=email===get().userEmail&&password===get().userPassword;set({isAuthenticated:valid});return valid;
+      }
+      assertOnline();
+      const {data,error}=await supabase.auth.signInWithPassword({email,password});
+      if(error||!data.user)return false;
+      try{await establishSession(data.user);localStorage.removeItem(SIGNED_OUT_KEY);return true;}catch(error){await supabase.auth.signOut({scope:'local'});throw error;}
+    },
+    logout:()=>{
+      authEpoch++;syncPromise=null;minimumRevision=0;snapshotRevision=-1;approvals.clear();
+      if(supabase) {localStorage.setItem(SIGNED_OUT_KEY,'true');set({...emptyData,cart:[],isAuthenticated:false,userId:null,userEmail:'',userPassword:'',invoiceEditPin:'',remoteReady:false,isSaving:false,lastVerifiedUserId:null});void supabase.auth.signOut({scope:'local'});}
+      else set({isAuthenticated:false});
+    },
+    updateCredentials:async(email,password)=>{
+      if(!supabase){set({userEmail:email,userPassword:password});return;}
+      assertOnline();
+      const {data,error}=await supabase.auth.updateUser({email,...(password?{password}:{})});
+      if(error)throw new Error(message(error));
+      set({userEmail:data.user?.email||get().userEmail,userPassword:''});
+      if(data.user?.new_email) set({lastSyncMessage:'Confirm the email change using the links sent by Supabase Auth.'});
+    },
+    verifyInvoicePin:async(pin,id,action)=>{
+      if(!supabase)return get().invoiceEditPin===pin;
+      assertOnline();
+      if(!id||!action)return false;
+      const {data,error}=await supabase.rpc('pos_authorize_invoice',{p_id:id,p_action:action==='edit'?'update':'delete',p_pin:pin});
+      if(error)throw new Error(message(error));
+      if(!data)return false;
+      approvals.set(`${id}:${action==='edit'?'update':'remove'}`,data);return true;
+    },
+    updateInvoicePin:async(current,next)=>{
+      if(!supabase){if(current!==get().invoiceEditPin)return false;set({invoiceEditPin:next});return true;}
+      assertOnline();
+      const {data,error}=await supabase.rpc('pos_set_pin',{p_current:current,p_next:next});
+      if(error)throw new Error(message(error));return data===true;
+    },
+    syncData:async()=>{
+      if(!supabase||!get().isAuthenticated)return;
+      if(syncPromise)return syncPromise;
+      const epoch=authEpoch;
+      const run=async()=>{
+        try{
+          assertOnline();
+          const {data,error}=await supabase!.rpc('pos_snapshot').abortSignal(AbortSignal.timeout(20000));
+          if(error)throw error;
+          const decoded=decodeSnapshot(data);
+          if(epoch!==authEpoch)return;
+          if(Number(data.revision)<minimumRevision||Number(data.revision)<snapshotRevision){if(staleReadRetries++<1){setTimeout(()=>void get().syncData().catch(()=>{}),0);return;}throw new Error('The server returned older data than a confirmed save. Cached data is kept. Contact your administrator before continuing.');}
+          staleReadRetries=0;
+          snapshotRevision=Number(data.revision);set({...decoded,remoteReady:true,lastVerifiedUserId:get().userId,lastSyncMessage:null});
+        }catch(error){if(epoch===authEpoch){set({lastSyncMessage:message(error),remoteReady:false});if((error as any)?.code==='42501')get().logout();}throw new Error(message(error));}
+      };
+      const pending=run();syncPromise=pending;
+      try{await pending;}finally{if(syncPromise===pending)syncPromise=null;}
+    },
+    // Legacy unsynchronized mutations are retained in their OLD storage key for
+    // manual recovery; never replay old/demo writes into a newly connected salon.
+    flushPendingMutations:async()=>{if(supabase)await get().syncData();},
+    enqueuePendingMutation:()=>{throw new Error('Offline database writes are disabled. Reconnect to save.');},
+  };
+},{
+  name:STORAGE_KEY,
+  storage:createJSONStorage(()=>({getItem:key=>localStorage.getItem(key),setItem:(key,value)=>{try{localStorage.setItem(key,value);}catch(error){if(!supabase)throw error;if(!cacheUnavailable){cacheUnavailable=true;queueMicrotask(()=>useStore.setState({cacheWarning:'Browser cache is full or unavailable. Server records are safe; offline viewing may be incomplete.'}));}}},removeItem:key=>localStorage.removeItem(key)})),
+  partialize:state=>({...{lastVerifiedUserId:state.lastVerifiedUserId,barbers:state.barbers,services:state.services,packages:state.packages,customers:state.customers,invoices:state.invoices},...(!supabase?{pendingMutations:[],cart:state.cart,userEmail:state.userEmail,userPassword:state.userPassword,isAuthenticated:state.isAuthenticated,invoiceEditPin:state.invoiceEditPin}:{} )}),
+}));
 
-if (typeof window !== 'undefined') {
-  const { flushPendingMutations } = useStore.getState();
-  flushPendingMutations().catch((error) => {
-    console.warn('[OfflineQueue] Initial flush failed:', error);
+const draftKey=()=>`vistasaloon-bill-draft:${scope}:${useStore.getState().userId}`;
+async function establishSession(user:{id:string;email?:string}) {
+  const epoch=++authEpoch;syncPromise=null;minimumRevision=0;snapshotRevision=-1;
+  const {data,error}=await supabase!.rpc('pos_snapshot').abortSignal(AbortSignal.timeout(20000));
+  if(error)throw new Error(message(error));
+  const decoded=decodeSnapshot(data);
+  if(epoch!==authEpoch)return;
+  snapshotRevision=Number(data.revision);staleReadRetries=0;
+  let cart:InvoiceItem[]=[];
+  try{const saved=JSON.parse(sessionStorage.getItem(`vistasaloon-bill-draft:${scope}:${user.id}`)||'null');if(Array.isArray(saved?.cart))cart=saved.cart;}catch{ /* A draft is never uploaded automatically. */ }
+  restoringAuth=true;
+  useStore.setState({...decoded,cart,isAuthenticated:true,userId:user.id,userEmail:user.email||'',userPassword:'',invoiceEditPin:'',remoteReady:true,lastVerifiedUserId:user.id,lastSyncMessage:null});
+  restoringAuth=false;
+}
+export function startProductionSync(){
+  if(!supabase)return ()=>{};
+  let stopped=false;const initialEpoch=authEpoch;
+  const refresh=()=>{if(!stopped&&useStore.getState().isAuthenticated&&document.visibilityState!=='hidden')void useStore.getState().syncData().catch(()=>{});};
+  // Do not await Auth calls inside onAuthStateChange (the Auth lock is held there).
+  const {data:{subscription}}=supabase.auth.onAuthStateChange((event)=>{
+    if(event==='SIGNED_OUT'){authEpoch++;syncPromise=null;approvals.clear();useStore.setState({...emptyData,isAuthenticated:false,userId:null,cart:[],remoteReady:false,lastVerifiedUserId:null});}
   });
-
-  window.addEventListener('online', () => {
-    const { flushPendingMutations: flush } = useStore.getState();
-    flush().catch((error) => {
-      console.warn('[OfflineQueue] Auto-flush failed:', error);
-    });
+  void (async()=>{
+    if(localStorage.getItem(SIGNED_OUT_KEY)==='true')return;
+    const {data:{session}}=await supabase.auth.getSession();
+    if(stopped||initialEpoch!==authEpoch||!session||useStore.getState().isAuthenticated)return;
+    if(!navigator.onLine && session.user.id===useStore.getState().lastVerifiedUserId && (session.expires_at||0)>Date.now()/1000){
+      let cart:InvoiceItem[]=[];
+      try{const saved=JSON.parse(sessionStorage.getItem(`vistasaloon-bill-draft:${scope}:${session.user.id}`)||'null');if(Array.isArray(saved?.cart))cart=saved.cart;}catch{}
+      restoringAuth=true;useStore.setState({isAuthenticated:true,userId:session.user.id,userEmail:session.user.email||'',cart,remoteReady:false,lastSyncMessage:'Offline: showing cached data. Reconnect to save.'});restoringAuth=false;return;
+    }
+    const {data,error}=await supabase.auth.getUser();
+    if(stopped||initialEpoch!==authEpoch||error||!data.user||useStore.getState().isAuthenticated)return;
+    try{await establishSession(data.user);}catch{if(!stopped)useStore.getState().logout();}
+  })().catch(()=>{/* Sign-in stays required unless a verified cached session can be used offline. */}).finally(()=>{if(!stopped)useStore.setState({authInitializing:false});});
+  const offline=()=>useStore.setState({remoteReady:false,lastSyncMessage:'Offline: cached data is available. Reconnect to save; your bill draft is kept.'});
+  window.addEventListener('offline',offline);
+  const unsubscribe=useStore.subscribe((state,previous)=>{
+    if(!restoringAuth && state.isAuthenticated && state.cart!==previous.cart){try{sessionStorage.setItem(draftKey(),JSON.stringify({...JSON.parse(sessionStorage.getItem(draftKey())||'{}'),cart:state.cart}));}catch{useStore.setState({lastSyncMessage:'Browser storage is full. Keep this tab open until the bill is saved.'});}}
   });
-
-  window.addEventListener('storage', (event) => {
-    if (event.key !== STORAGE_KEY) return;
-    (useStore.persist.rehydrate() as Promise<void>).catch((error) => {
-      console.warn('[Store] Cross-tab sync failed:', error);
-    });
-  });
+  window.addEventListener('online',refresh);window.addEventListener('focus',refresh);document.addEventListener('visibilitychange',refresh);
+  const interval=setInterval(refresh,15000);
+  return ()=>{stopped=true;subscription.unsubscribe();unsubscribe();clearInterval(interval);window.removeEventListener('offline',offline);window.removeEventListener('online',refresh);window.removeEventListener('focus',refresh);document.removeEventListener('visibilitychange',refresh);};
 }

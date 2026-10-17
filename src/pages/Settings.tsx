@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import { newUuid } from '../utils/uuid';
+import React, { useRef, useState } from 'react';
+import { isSupabaseConfigured } from '../api/supabase';
 import { isDemoMode } from '../demo/mode';
 import { resetDemoWorkspace } from '../demo/workspace';
 import { AppSettingsPanel } from '../components/AppSettingsPanel';
@@ -26,6 +28,8 @@ export const Settings: React.FC = () => {
   const [newPackage, setNewPackage] = useState({ name: '', price: '', services: '' });
   const [newBarber, setNewBarber] = useState('');
   const [credentialsDraft, setCredentialsDraft] = useState({ email: userEmail, password: userPassword });
+  const creationIds=useRef<Record<string,string>>({});
+  const editVersions = useRef<Record<string,number|undefined>>({});
   const [pinDraft, setPinDraft] = useState({ current: '', next: '' });
 
   // Edit states
@@ -47,11 +51,12 @@ export const Settings: React.FC = () => {
     if (!newService.name || !newService.price) return;
     try {
       await addService({
-        id: crypto.randomUUID(),
+        id: creationIds.current.service ||= newUuid(),
         name: newService.name,
         price: Number(newService.price),
         active: true
       });
+      delete creationIds.current.service;
       setNewService({ name: '', price: '' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to add service.';
@@ -68,12 +73,13 @@ export const Settings: React.FC = () => {
       .filter(Boolean);
     try {
       await addPackage({
-        id: crypto.randomUUID(),
+        id: creationIds.current.package ||= newUuid(),
         name: newPackage.name,
         price: Number(newPackage.price),
         services: servicesList,
         active: true,
       });
+      delete creationIds.current.package;
       setNewPackage({ name: '', price: '', services: '' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to add package.';
@@ -86,11 +92,12 @@ export const Settings: React.FC = () => {
     if (!newBarber) return;
     try {
       await addBarber({
-        id: crypto.randomUUID(),
+        id: creationIds.current.barber ||= newUuid(),
         name: newBarber,
         active: true,
         commissionRate: 0
       });
+      delete creationIds.current.barber;
       setNewBarber('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to add barber.';
@@ -103,7 +110,8 @@ export const Settings: React.FC = () => {
     if (!credentialsDraft.email || !credentialsDraft.password) return;
     try {
       await updateCredentials(credentialsDraft.email.trim(), credentialsDraft.password);
-      alert('Login credentials updated');
+      setCredentialsDraft(current=>({...current,password:''}));
+      alert('Login credentials updated. If email confirmation is enabled, confirm the email links before using the new address.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to update login.';
       alert(message);
@@ -112,7 +120,7 @@ export const Settings: React.FC = () => {
 
   const handleUpdatePin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pinDraft.current || !pinDraft.next) return;
+    if (!pinDraft.next) return;
     try {
       const ok = await updateInvoicePin(pinDraft.current, pinDraft.next);
       if (ok) {
@@ -139,6 +147,7 @@ export const Settings: React.FC = () => {
     if (!service) return;
     setServiceDeleteConfirm(null);
     setEditingServiceId(serviceId);
+    editVersions.current.service=service.version;
     setServiceDraft({ name: service.name, price: service.price.toString() });
   };
 
@@ -154,6 +163,7 @@ export const Settings: React.FC = () => {
     if (!pkg) return;
     setPackageDeleteConfirm(null);
     setEditingPackageId(packageId);
+    editVersions.current.pkg=pkg.version;
     setPackageDraft({
       name: pkg.name,
       price: pkg.price.toString(),
@@ -171,6 +181,7 @@ export const Settings: React.FC = () => {
     try {
       await updatePackage({
         ...pkg,
+        version: editVersions.current.pkg,
         name: packageDraft.name,
         price: Number(packageDraft.price) || 0,
         services: servicesList,
@@ -187,7 +198,7 @@ export const Settings: React.FC = () => {
     const service = services.find((s) => s.id === serviceId);
     if (!service) return;
     try {
-      await updateService({ ...service, name: serviceDraft.name, price: Number(serviceDraft.price) || 0 });
+      await updateService({ ...service, version: editVersions.current.service, name: serviceDraft.name, price: Number(serviceDraft.price) || 0 });
       setEditingServiceId(null);
       setServiceDraft({ name: '', price: '' });
     } catch (error) {
@@ -222,6 +233,7 @@ export const Settings: React.FC = () => {
     if (!barber) return;
     setBarberDeleteConfirm(null);
     setEditingBarberId(barberId);
+    editVersions.current.barber=barber.version;
     setBarberDraft({ name: barber.name, commissionRate: (barber.commissionRate ?? 0).toString() });
   };
 
@@ -241,7 +253,8 @@ export const Settings: React.FC = () => {
     if (!barber) return;
     try {
       await updateBarber({ 
-        ...barber, 
+        ...barber,
+        version: editVersions.current.barber,
         name: barberDraft.name, 
         commissionRate: Number(barberDraft.commissionRate) || 0 
       });
@@ -258,6 +271,7 @@ export const Settings: React.FC = () => {
     if (!customer) return;
     setCustomerDeleteConfirm(null);
     setEditingCustomerId(customerId);
+    editVersions.current.customer=customer.version;
     setCustomerDraft({ name: customer.name, phone: customer.phone });
   };
 
@@ -265,7 +279,7 @@ export const Settings: React.FC = () => {
     const customer = customers.find((c) => c.id === customerId);
     if (!customer) return;
     try {
-      await updateCustomer({ ...customer, name: customerDraft.name, phone: customerDraft.phone });
+      await updateCustomer({ ...customer, version: editVersions.current.customer, name: customerDraft.name, phone: customerDraft.phone });
       setEditingCustomerId(null);
       setCustomerDraft({ name: '', phone: '' });
     } catch (error) {
@@ -996,7 +1010,7 @@ export const Settings: React.FC = () => {
             </form>
 
             <div className="border-t border-teal-200 pt-4">
-              <h3 className="text-sm font-semibold text-gray-800 mb-3">Invoice Edit PIN</h3>
+              <h3 className="text-sm font-semibold text-gray-800 mb-3">Invoice Edit PIN</h3>{isSupabaseConfigured()&&<p className="text-sm text-gray-500 mb-3">Set a PIN before editing or deleting invoices. Leave Current PIN blank for the first setup only.</p>}
               <form onSubmit={handleUpdatePin} className="space-y-3">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="settings-field-9">Current PIN</label>

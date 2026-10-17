@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import { newUuid } from '../utils/uuid';
+import React, { useRef, useState } from 'react';
 import { ResponsiveDialog } from './ResponsiveDialog';
 import { Customer } from '../types';
 import { X } from 'lucide-react';
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export const CustomerModal: React.FC<Props> = ({ isOpen, onClose, onSave, onUseExisting }) => {
+  const creationId=useRef<string|null>(null);
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
@@ -45,11 +47,12 @@ export const CustomerModal: React.FC<Props> = ({ isOpen, onClose, onSave, onUseE
     setIsSaving(true);
     try {
       await onSave({
-        id: crypto.randomUUID(),
+        id: creationId.current ||= newUuid(),
         name,
         phone,
         email,
       });
+      creationId.current=null;
       setName('');
       setPhone('');
       setEmail('');

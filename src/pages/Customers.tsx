@@ -106,68 +106,13 @@ export const Customers: React.FC = () => {
     setIsExporting(true);
     try {
       const XLSX=await import('xlsx');
-    if (isDemoMode || !supabase) {
-      const rows = [...customers].sort((a, b) => a.name.localeCompare(b.name)).map(customer => ({
-        'Complete Name': customer.name, Numbers: customer.phone,
-      }));
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Customers');
-      XLSX.writeFile(workbook, isDemoMode ? 'vistasaloonmanagement-demo-customers.xlsx' : 'vistasaloonmanagement-local-customers.xlsx');
-      return;
-    }
-
-      const pageSize = 1000;
-      let from = 0;
-      const dbCustomers: Array<{ id: string; name: string | null; phone: string | null }> = [];
-
-      while (true) {
-        const to = from + pageSize - 1;
-        const { data, error } = await supabase
-          .from('customers')
-          .select('id, name, phone')
-          .order('name', { ascending: true })
-          .order('id', { ascending: true })
-          .range(from, to);
-
-        if (error) {
-          throw error;
-        }
-
-        const page = (data ?? []) as Array<{ id: string; name: string | null; phone: string | null }>;
-        if (page.length === 0) {
-          break;
-        }
-
-        dbCustomers.push(...page);
-
-        if (page.length < pageSize) {
-          break;
-        }
-
-        from += pageSize;
-      }
-
-      if (dbCustomers.length === 0) {
-        alert('No customers available to export.');
-        return;
-      }
-
-      const rows = dbCustomers
-        .map((customer) => ({
-          completeName: customer.name?.trim() ?? '',
-          numbers: customer.phone?.trim() ?? '',
-        }))
-        .sort((a, b) => a.completeName.localeCompare(b.completeName, undefined, { sensitivity: 'base' }))
-        .map((customer) => ({
-          'Complete Name': customer.completeName,
-          Numbers: customer.numbers,
-        }));
-
-      const ws = XLSX.utils.json_to_sheet(rows);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Customers');
-      const dateStr = new Date().toISOString().split('T')[0];
-      XLSX.writeFile(wb, `vistasaloonmanagement-customers-${dateStr}.xlsx`);
+      if(supabase) await useStore.getState().syncData();
+      const exportCustomers=supabase?useStore.getState().customers:customers;
+      if(!exportCustomers.length){alert('No customers available to export.');return;}
+      const rows=[...exportCustomers].sort((a,b)=>a.name.localeCompare(b.name)).map(customer=>({'Complete Name':customer.name,Numbers:customer.phone}));
+      const workbook=XLSX.utils.book_new();XLSX.utils.book_append_sheet(workbook,XLSX.utils.json_to_sheet(rows),'Customers');
+      const date=new Date().toISOString().slice(0,10);
+      XLSX.writeFile(workbook,isDemoMode?'vistasaloonmanagement-demo-customers.xlsx':`vistasaloonmanagement-customers-${date}.xlsx`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to export customers from database.';
       alert(message);

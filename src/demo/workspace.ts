@@ -1,3 +1,4 @@
+import { newUuid } from '../utils/uuid';
 import { useServiceCategories } from '../store/useServiceCategories';
 import { useStore } from '../store/useStore';
 import { Barber, Customer, Invoice, InvoiceItem, Service, ServicePackage } from '../types';
@@ -7,11 +8,11 @@ const SEED_MARKER = 'vistasaloon-demo-seeded-v1';
 
 export function createDemoData() {
   const barbers: Barber[] = [
-    { id: 'demo-team-1', name: 'Aisha Noor', active: true, commissionRate: 20 },
-    { id: 'demo-team-2', name: 'Adam Reed', active: true, commissionRate: 18 },
-    { id: 'demo-team-3', name: 'Maya Rose', active: true, commissionRate: 25 },
-    { id: 'demo-team-4', name: 'Zain Ali', active: true, commissionRate: 15 },
-    { id: 'demo-team-5', name: 'Sara Khan', active: false, commissionRate: 20 },
+    { id: newUuid(), name: 'Aisha Noor', active: true, commissionRate: 20 },
+    { id: newUuid(), name: 'Adam Reed', active: true, commissionRate: 18 },
+    { id: newUuid(), name: 'Maya Rose', active: true, commissionRate: 25 },
+    { id: newUuid(), name: 'Zain Ali', active: true, commissionRate: 15 },
+    { id: newUuid(), name: 'Sara Khan', active: false, commissionRate: 20 },
   ];
   const catalog: [string, number, number][] = [
     ['Hair Cut - Regular', 400, 30], ['Hair Cut - Kids', 400, 25], ['Hair Cut - Fade', 600, 40],
@@ -23,19 +24,19 @@ export function createDemoData() {
     ['Keratin Treatment', 6500, 120], ['Bridal Consultation', 1500, 45],
   ];
   const services: Service[] = catalog.map(([name, price, duration], index) => ({
-    id: `demo-service-${index + 1}`, name, price, duration, active: index !== 19,
+    id: newUuid(), name, price, duration, active: index !== 19,
   }));
   const packages: ServicePackage[] = [
-    { id: 'demo-package-1', name: 'Everyday Refresh', price: 2000, services: ['Cut & Blow Dry', 'Head Wash', 'Massage - Head'], active: true },
-    { id: 'demo-package-2', name: 'Groom & Go', price: 1000, services: ['Hair Cut - Fade', 'Beard Cut - Trim', 'Head Wash'], active: true },
-    { id: 'demo-package-3', name: 'Self-care Ritual', price: 4800, services: ['Hydrating Facial', 'Manicure', 'Pedicure'], active: true },
-    { id: 'demo-package-4', name: 'Color & Care', price: 6000, services: ['Hair Color - Full', 'Hair Spa', 'Head Wash'], active: true },
-    { id: 'demo-package-5', name: 'Seasonal Styling', price: 3000, services: ['Occasion Styling', 'Manicure'], active: false },
+    { id: newUuid(), name: 'Everyday Refresh', price: 2000, services: ['Cut & Blow Dry', 'Head Wash', 'Massage - Head'], active: true },
+    { id: newUuid(), name: 'Groom & Go', price: 1000, services: ['Hair Cut - Fade', 'Beard Cut - Trim', 'Head Wash'], active: true },
+    { id: newUuid(), name: 'Self-care Ritual', price: 4800, services: ['Hydrating Facial', 'Manicure', 'Pedicure'], active: true },
+    { id: newUuid(), name: 'Color & Care', price: 6000, services: ['Hair Color - Full', 'Hair Spa', 'Head Wash'], active: true },
+    { id: newUuid(), name: 'Seasonal Styling', price: 3000, services: ['Occasion Styling', 'Manicure'], active: false },
   ];
   const names = ['Emma Wilson', 'Omar Ahmed', 'Sophia James', 'Daniel Brooks', 'Amina Shah', 'Liam Parker', 'Noor Hassan', 'Olivia Reed', 'Ryan Malik', 'Zara Ali', 'James Carter', 'Leila Khan', 'Ethan Blake', 'Mia Collins', 'Aria Rose', 'Hugo Evans', 'Ava Scott', 'Sam Taylor'];
   const notes = ['Prefers a quiet appointment. Patch test before color.', 'Usually visits after work. Prefers a natural finish.', 'Interested in hair care packages.', 'Regular client. Likes a head massage after styling.'];
   const customers: Customer[] = names.map((name, index) => ({
-    id: `demo-client-${index + 1}`, name, phone: `000${String(index + 1).padStart(8, '0')}`,
+    id: newUuid(), name, phone: `000${String(index + 1).padStart(8, '0')}`,
     email: `client${index + 1}@example.test`, notes: `Fictional demo client. ${notes[index % notes.length]}`,
     active: index !== 17,
   }));
@@ -62,7 +63,7 @@ export function createDemoData() {
     const discountValue = index % 4 === 0 ? 10 : index % 5 === 0 ? 100 : 0;
     const discount = discountType === 'percent' ? subtotal * discountValue / 100 : Math.min(subtotal, discountValue);
     return {
-      id: `de${String(index + 1).padStart(6, '0')}-0000-4000-8000-${String(index + 1).padStart(12, '0')}`, date: date.toISOString(),
+      id: newUuid(), date: date.toISOString(),
       customerId: walkIn ? undefined : customer.id, customerName: walkIn ? 'Walk-in Customer' : customer.name,
       items, subtotal, discount, discountType, discountValue, total: subtotal - discount,
       status: index % 6 === 0 ? 'pending' : 'paid', paymentMode: index % 3 === 0 ? 'online' : 'cash',

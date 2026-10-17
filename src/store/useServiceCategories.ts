@@ -1,3 +1,4 @@
+import { newUuid, isUuid } from '../utils/uuid';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { Service } from '../types';
@@ -117,7 +118,7 @@ export const useServiceCategories = create<CategoryState>()(persist((set, get) =
   },
   addCategory: async name => {
     const cleaned = validateName(name, get().categories);
-    const id = crypto.randomUUID();
+    const id = newUuid();
     if (supabase) await remoteMutation('mutate_service_category_catalog', { p_action: 'add', p_category_id: id, p_name: cleaned });
     else set(state => ({ categories: [...state.categories, { id, name: cleaned }] }));
     return id;
@@ -147,11 +148,12 @@ export const useServiceCategories = create<CategoryState>()(persist((set, get) =
     if (!supabase) return 0;
     const saved = JSON.parse(localStorage.getItem('vistasaloon-categories-v1') || 'null')?.state;
     if (!saved || !Array.isArray(saved.categories)) throw new Error('No local categories are available to import.');
+    const importedIds=new Map<string,string>(saved.categories.map((category:ServiceCategory)=>[category.id,isUuid(category.id)?category.id:newUuid()]));
     const memberships = Object.entries(saved.serviceCategories || {}).flatMap(([serviceId, ids]) => {
       if (!Array.isArray(ids)) throw new Error('The local category assignments are invalid.');
-      return ids.map(categoryId => ({ service_id: serviceId, category_id: categoryId }));
+      return ids.map(categoryId => ({ service_id: serviceId, category_id: importedIds.get(categoryId) || categoryId }));
     });
-    const result = await remoteMutation('import_service_category_catalog', { p_categories: saved.categories.map(({ id, name }: ServiceCategory) => ({ id, name })), p_memberships: memberships });
+    const result = await remoteMutation('import_service_category_catalog', { p_categories: saved.categories.map(({ id, name }: ServiceCategory) => ({ id:importedIds.get(id), name })), p_memberships: memberships });
     return Number(result.skipped_memberships || 0);
   },
   reset: services => {
@@ -199,7 +201,7 @@ export function startCategorySync() {
   };
   const schedule = () => { clearTimeout(debounce); debounce = setTimeout(refresh, 120); };
   const visibility = () => { if (document.visibilityState === 'visible') refresh(); };
-  const channel = supabase.channel(`service-categories-${crypto.randomUUID()}`)
+  const channel = supabase.channel(`service-categories-${newUuid()}`)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'service_categories' }, schedule)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'service_category_memberships' }, schedule)
     .subscribe(status => { if (status === 'SUBSCRIBED') schedule(); });

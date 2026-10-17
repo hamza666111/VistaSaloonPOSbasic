@@ -1,112 +1,111 @@
-# Connecting Vista Saloon POS System to a new Supabase project
+# Delivering Vista Saloon POS System
 
-The current local demo remains disconnected. No live database migration or Vercel deployment has been performed.
+One salon per Supabase project and Vercel deployment. This is not a shared multi-tenant SaaS database. All explicitly authorized salon members currently have the same management privileges. Do not place unrelated buyers in one project.
 
-## Production security prerequisite
+The production integrity upgrade changes the inherited backend access and save paths intentionally. The original root SQL scripts remain historical references, not the deployment procedure. No live Supabase project has been contacted or migrated during this audit.
 
-The inherited application compares credentials from `app_users` in the browser, persists credentials locally, and its supplied schema has open anonymous policies for existing records. This is not Supabase Auth and is not suitable for an untrusted public production deployment.
+## Database installation and upgrade
 
-The category and App settings migrations preserve that access model for compatibility: category reads and narrowly scoped mutation/import RPCs are accessible to the public anon role. Direct inserts, updates, and deletes on the new tables are denied to browser roles, but that is not a substitute for user authorization. Anyone holding the public project configuration can call these RPCs, including updating branding. The project must remain a single salon installation; this does not add tenant isolation.
+Create a NEW Supabase project for the buyer. Never connect this white-label copy to the former customer's database.
 
-Before public launch, replace the browser password comparison with real server-verified authentication (such as Supabase Auth), remove the open policies on existing tables, and authorize existing data plus the category and App settings RPCs/tables for the actual salon users. Changing only the new category policies would leave the rest of the application exposed. That broader authentication migration is separate from category synchronization and has not been silently applied to the preserved business backend.
+For a fresh, empty database, apply these migrations once, in order:
 
-## Database setup
+1. `supabase/migrations/202610160001_base_schema.sql`
+2. `supabase/migrations/202610170001_service_categories.sql`
+3. `supabase/migrations/202610170002_app_settings.sql`
+4. `supabase/migrations/202610170003_customer_activity.sql`
+5. `supabase/migrations/202610180001_production_integrity.sql`
 
-Create a NEW Supabase project for this installation. No SQL should be applied to the former customer's project.
+For an existing database initialized from the original root scripts, take a complete backup and test restoring it in a separate project first. Skip the fresh baseline; apply only unapplied migrations after reconciling migration history. Test the upgrade against that restored copy before upgrading customer data. Never reset the database or replay the old root scripts over real sales. See [Supabase migration guidance](https://supabase.com/docs/guides/deployment/database-migrations).
 
-For a **fresh, empty database**, run every file in `supabase/migrations` in this order:
+The final migration converts legacy service, team, deal and category label IDs into UUID strings, updating foreign keys and historical invoice JSON references. Its private mapping is retained in `private.legacy_ids`. Customer/invoice/item IDs already use PostgreSQL UUIDs. Core entity IDs have cryptographic defaults, primary keys and a permanent cross-entity registry. A pre-existing cross-entity UUID collision aborts the migration for review rather than silently merging data. Existing malformed data or unexpected custom constraints can also stop the transaction safely; investigate instead of bypassing checks.
 
-1. `202610160001_base_schema.sql` - the preserved original core/package schema and default local admin seed. It refuses to run if any core application table already exists, preventing accidental baseline replay over an existing installation.
-2. `202610170001_service_categories.sql` - categories, memberships and catalog RPCs.
-3. `202610170002_app_settings.sql` - shared name, contact details, theme and logo.
-4. `202610170003_customer_activity.sql` - the `customers.active` flag already used by the application's activate/deactivate actions.
+Core records gain versions and deletion metadata. The migration revokes inherited anonymous access and direct browser writes, replaces public policies, secures existing category/branding mutations, adds atomic core RPCs, and disables/redacts obsolete `app_users` passwords/PINs. The old default admin is **not** a production login. This upgrade must be deployed alongside the new frontend. Do not run older additive migrations again afterward: they contain the historical compatibility permissions. Only the final upgrade itself is tested for replay without resetting sales, PIN configuration or authorization.
 
-The root `supabase_schema.sql` and `supabase_packages.sql` are retained as original references; do not run them again after the fresh baseline. For an **existing installation** created using those two scripts, skip the fresh baseline and apply only the unapplied additive migrations (the last three above). If using the CLI with an existing migration history, reconcile the existing baseline/history first; do not blindly replay the fresh baseline or use a database reset on customer data. See [Supabase database migration guidance](https://supabase.com/docs/guides/deployment/database-migrations).
+No Edge Functions exist or are required for these features. The application calls authenticated PostgreSQL RPCs. Do not deploy placeholder Edge Functions or put service-role credentials in the browser.
 
-Verify all 11 application tables exist and the category/branding RPCs were created. Category and App settings migrations add their three tables to `supabase_realtime` when that publication exists. If needed, enable Postgres Changes for these tables in the project's dashboard. Visible-tab polling remains available (15 seconds for categories, 30 seconds for branding).
+## Provision the owner's account
 
-The original billing definitions/store and original SQL files remain unchanged. The customer activity migration adds one column with existing clients defaulting to active and preserves any previously stored inactive values on reruns. No original grants or RLS policies are changed. Validate the core tables' API permissions against the actual authentication model in the new project before enabling remote sync; no broad API grants are supplied by these compatibility fixes. The production authentication/RLS prerequisite above still applies.
+Create the owner through Supabase Dashboard > Authentication > Users with a strong, buyer-specific password. Disable public signup when the salon does not need it. Set the correct production Site URL and permitted redirect URLs before testing email changes. Supabase Auth handles password storage and session refresh; browser password comparison is not used in connected mode.
 
-Category deletion only removes its new membership rows; it never deletes services or historical invoices. Upgrades are repeatable without resetting branding, sales, category data or account credentials. The fresh baseline intentionally runs once and is not a repeatable upgrade.
+Copy the Auth user UUID, then run as the database administrator:
 
-The shared catalog intentionally starts empty. A new browser does not upload its local defaults or recreate categories deleted elsewhere. Add categories in Settings > Categories. New services with no shared memberships appear in Uncategorized.
+```sql
+insert into private.pos_members(user_id, active)
+values ('REPLACE_WITH_AUTH_USER_UUID'::uuid, true)
+on conflict (user_id) do update set active = excluded.active;
+```
 
-## Local connection / Vercel configuration
+An authenticated account without an active membership cannot read salon data or call management mutations. Membership cannot be granted through a public browser request. To revoke an account:
 
-Use the new project's public URL and public anon/publishable key. A service role key must never appear in a `VITE_` variable.
+```sql
+update private.pos_members set active = false
+where user_id = 'REPLACE_WITH_AUTH_USER_UUID'::uuid;
+```
+
+After signing in, open Settings > Account and initialize a new invoice PIN. Leave Current PIN blank only on first setup. Existing PIN changes require the current PIN. PINs are salted bcrypt hashes in a private table; five failed checks lock that account's PIN attempts for 15 minutes. Edit/delete approval is bound to the signed-in user, invoice and action; it expires after 15 minutes and is consumed by a successful operation. Configure PIN before handing over the installation. Dashboard administrators remain trusted and can manage/recover database data.
+
+Reference: [Supabase Auth](https://supabase.com/docs/guides/auth), [Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security).
+
+## Vercel and local environment
+
+Use only the new project's public URL and anon/publishable key:
 
 ```dotenv
 VITE_ENABLE_REMOTE_SYNC=true
 VITE_DEMO_MODE=false
 VITE_SUPABASE_URL=https://YOUR_NEW_PROJECT.supabase.co
 VITE_SUPABASE_ANON_KEY=YOUR_PUBLIC_KEY
+VITE_WHATSAPP_DEFAULT_COUNTRY_CODE=92
 ```
 
-For localhost, put these in ignored `.env.local` and restart Vite. On Vercel, set them for the intended deployment environment, then rebuild/redeploy: Vite variables are embedded at build time. The retained `vercel.json` routes page reloads back to `index.html`. Never place live credentials in this repository.
+For localhost, place these in ignored `.env.local` and restart Vite. For Vercel, set the environment variables for the intended deployment and rebuild. Keep previews on a staging project. Never put `service_role`, secret keys or database passwords in `VITE_` variables; Vite embeds these values in public JavaScript. Production sign-in and data mutation are disabled if the backend is disconnected. The development demo still works locally with remote sync explicitly disabled.
 
-Keep Preview deployments pointed at a test project. Keep the current local mock-data profile disconnected. Production builds never initialize demo records. Demo category storage and shared category caches have different keys; shared caches are also isolated by project host. The preserved legacy sales store has its own older storage behavior, so use a clean browser profile when first connecting a new installation and do not flush old/demo sales into it.
+Use HTTPS on deployed devices. Node.js 20.19+ or 22.12+ is required by the build. Current Tailwind 4 styling targets modern browsers: Safari 16.4+, Chrome 111+, Firefox 128+. Test the buyer's actual phones before delivery. `vercel.json` provides SPA route rewrites. See the [Tailwind browser requirements](https://tailwindcss.com/docs/upgrade-guide#browser-requirements).
 
-## Bringing genuine local categories forward
+## Save, synchronization and offline behavior
 
-When connecting from the same browser/origin that contains real non-demo categories, Settings > Categories offers **Import local categories** after the first successful shared refresh. This is an explicit merge, not an automatic upload.
+Connected mode displays a successful save only after a database acknowledgement. Invoice header/items and deal header/items commit in one transaction. A failed statement rolls the complete operation back. Durable per-tab request IDs and invoice UUIDs protect retries from a lost acknowledgement. Retry the same bill; if its contents changed after an uncertain save, first inspect Invoices before creating a replacement.
 
-- Matching category names are reused without replacing shared categories.
-- Assignments are added individually; existing assignments remain.
-- Unknown service IDs are skipped and reported. The service records must already exist in the new database before their category assignments can be imported.
-- An invalid import rolls back as one transaction.
-- Local demo categories are not imported.
-- Browser storage is origin-specific. If you need categories from localhost, connect that same localhost profile to the new project and import them before switching to the deployed origin.
+Invoice UUIDv4 generation is cryptographic. Random UUIDs cannot be mathematically promised never to collide; primary keys and a permanent ID registry reject collisions or reused entity IDs. IDs are immutable. Do not truncate the registry or reset IDs when cleaning historical data.
 
-## What synchronization guarantees
+Snapshot reads return one consistent JSON response containing all core records, including more than the default 1,000 REST rows. Older responses cannot replace newer acknowledged data. Reads never seed catalog entries. Refreshes do not clear the active bill. Core data refreshes on reconnect, focus/visibility and every 15 seconds in visible tabs. Categories and branding retain Realtime plus polling. A missing migration or permission fails visibly rather than falling back to local credentials or local writes.
 
-Connected mode treats Supabase as authoritative. A change is displayed as saved only after the database acknowledges it. Realtime notifications, reconnect, focus/visibility changes, and a 15-second polling fallback refresh the category snapshot without invoking the legacy sales sync or clearing the current bill.
+Versions reject stale edits from another tab/device. Edit forms retain the version they opened with, so background refreshes do not silently authorize overwriting a newer record. Review the latest data and reopen an edit after a conflict. Catalog ordering controls remain local presentation preferences and are not a shared business setting.
 
-Membership changes update one service/category pair rather than overwriting the entire assignment collection. Changes to different pairs therefore merge across devices. For simultaneous changes to the same pair, the last committed operation wins. Renaming/deleting a category uses its version; a stale operation is rejected and the latest catalog is refreshed. A name being typed is retained during background updates, with an explicit option to use the latest server name.
+While an already-open application is offline, cached records remain viewable and the current bill remains editable. Database saves are blocked; reconnect and refresh before saving. The bill's lines, customer, discount, payment selection and checkout identity are stored per tab in session storage. Reload/route restoration is tested while the application can load. This is not a PWA and does not guarantee a cold launch/reload without network access. Closing the tab, clearing site data, private browsing restrictions or device loss can remove an **unsaved** draft. A browser cache or Excel export is not a database backup.
 
-If a save fails or its acknowledgement is lost, an error is shown and the catalog is refreshed to reconcile whether the server committed it. Requests have a 15-second timeout. While offline or unable to confirm the shared catalog, cached categories remain viewable and editing is disabled. Offline category edits are deliberately not queued, avoiding hidden conflicting changes across browsers.
+Production caches are scoped to the Supabase project, and do not persist application passwords, PINs or a trusted authentication flag. Supabase manages its own Auth tokens. Logout clears visible business records; the user must sign in again. Old local/demo queues are never uploaded into the new project. Old unsynchronized data remains under its previous browser key for explicit, administrator-reviewed recovery; do not blindly merge it into production.
 
-The snapshot RPC returns categories and memberships together, including more than 1,000 memberships, rather than relying on the default REST page size. An empty server catalog remains empty. Missing migration/permissions show an actionable error and retry control instead of silently switching to browser-only writes.
+## Intentional removal and recovery
 
-These guarantees apply to the category feature. The inherited core sales/authentication synchronization was preserved and is not a blanket guarantee that every existing feature has been hardened for concurrency or public production use.
+Removing a service, customer or team member deactivates it and retains historical references. Settings can reactivate these records. Removing an invoice or deal sets `deleted_at` and removes it from normal listings without physically erasing it or its line items. Stale writes cannot recreate deleted records. Invoice removal still requires the confirmation and server-authorized PIN flow.
 
-## Verification before customer delivery
+`private.pos_audit` records before/after values, timestamp, entity and acting Auth UUID. `private.pos_requests` stores acknowledged operations for retry handling. These contain customer/billing information: include them in backups and restrict administrator access. They have no automatic purge job. Plan retention/archiving for the installation's legal and operational requirements; do not delete idempotency/registry records casually.
 
-```sh
-npm ci
-npm run typecheck
-npm run build
-npm run test:ui
-npm run test:categories
-npm run test:category-sync
-npm run test:migrations
+For an accidental invoice removal, an administrator can inspect the exact UUID and audit history, then restore it intentionally:
+
+```sql
+select id, "customerName", date, total, deleted_at
+from public.invoices where deleted_at is not null order by deleted_at desc;
+
+-- Verify the intended invoice UUID before running this update.
+update public.invoices set deleted_at = null
+where id = 'REPLACE_WITH_VERIFIED_INVOICE_UUID'::uuid;
 ```
 
-The first two browser checks expect the regular local demo server running on port 5173. The category-sync test starts its own isolated Vite instance and local HTTP adapter backed by embedded PostgreSQL. It does not contact a real Supabase project. It verifies repeatable SQL, grants/constraints, two independent browser stores, concurrent membership changes, stale name/version checks, polling recovery, delayed reads, failed/lost acknowledgements, offline read-only caches, transactional import, deletion cascades, and a catalog with over 1,000 assignments.
+The record version/revision advances, and clients see the restored invoice after refresh. Do not use restore scripts to recreate a sale with a new UUID. For broader corruption or infrastructure loss, use a verified database restore, not browser caches.
 
-After configuring the actual project, repeat these manual checks on two browsers/devices: add and rename a category, assign/remove services, confirm changes appear without reloading, disconnect/reconnect one device, refresh both browsers, and confirm a bill in progress remains unchanged. Validate actual Supabase Realtime and the final authorization policies in that environment before deployment. A real thermal printer still needs its own integration test.
+## Checks required before selling each installation
 
-Reference: [Supabase Postgres Changes](https://supabase.com/docs/guides/realtime/postgres-changes) and [Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security).
+Run the automated checks in `PRODUCTION_AUDIT.md`. Then complete these on the actual staging Supabase/Vercel deployment:
 
-## Shared App settings
+- Real Auth sign-in, token refresh, logout, owner membership and nonmember/anonymous denial. Test email change confirmation and revoked membership.
+- Real pgcrypto PIN setup/change, wrong-PIN throttling and scoped edit/delete authorization. Embedded tests use explicit crypto shims and do not certify Supabase's bcrypt installation.
+- Two real devices: service/customer/deal creation, concurrent edit conflicts, checkout, refresh, history, categories and branding. Test connection failure and verify only one sale after retry.
+- Inspect imported legacy invoice JSON and line items before/after upgrade. Existing partial or inconsistent historical saves need administrator reconciliation; do not silently discard either representation.
+- Enable and verify automated database backups and the required retention/recovery window. Perform a restore drill into a separate project. Verify inclusion of Auth configuration, private audit/registry data and any future storage assets. See [Supabase backups](https://supabase.com/docs/guides/platform/backups).
+- Test real receipt printer/paper sizing, phone browsers, manual WhatsApp opening and the customer's number formats. WhatsApp sending remains manual; no API or delivery guarantee is provided.
+- Load-test the buyer's expected data volume. Full consistent snapshots avoid row caps but are not a claim of unlimited scale; large archives may require a separate paginated reporting design. Browser cache quotas also vary by device.
 
-The second additive migration creates the singleton `app_settings` table and `get_app_settings` / `save_app_settings` RPCs. It leaves the original billing schema and operational store untouched. Apply it before enabling remote sync. Its seed is repeatable and preserves existing branding.
-
-Settings > App configures shared salon name, address, phone, theme color, and logo. New projects start with Vista Saloon and blank contact details. Browser-only branding is not silently imported. Configure the salon after connecting. Logos are resized raster data stored in this row (maximum 360,000 characters); no Supabase Storage bucket is needed.
-
-Saves require a server acknowledgement. Version checks reject stale edits while preserving the form draft. Realtime plus focus/reconnect and a 30-second visible-tab poll refresh other devices. Unchanged reads omit the logo payload. Offline cached branding remains visible and editing is disabled until a successful refresh. Changes do not reset an active bill or change invoice calculations. The saved current branding is used when printing historical invoices.
-
-The inherited authentication production prerequisite above also applies to this table and its RPCs. Validate actual Supabase Realtime and authorization in the new project before launch. Run `npm run test:app-settings` and `npm run test:shared-settings` for local branding, receipt, logo, theme, conflict, migration, and multi-browser coverage.
-
-## Mobile delivery checks
-
-The mobile redesign adds no database migration. It retains the original billing/store operations and uses the additive migrations for categories, branding and customer activity. Run `npm run test:mobile` with the disconnected local demo server, plus the existing UI, category, invoice and app-settings suites. Verify navigation, customer entry with the keyboard open, a complete bill, invoice editing, download behavior, WhatsApp handoff and thermal printing on the customer's actual phones/tablets before launch. The production build loads routes and spreadsheet support on demand; deploy all generated assets together so the lazy-loaded chunks are available.
-
-
-## Migration audit
-
-`npm run test:migrations` initializes a fresh embedded PostgreSQL database using all four files, checks the existing service/customer/deal/invoice payloads, and then applies the additive upgrades repeatedly to both fresh and original-schema installations. It checks preservation of inactive clients, account passwords, invoices, branding and access grants. The separate `test:shared-settings` suite tests category/branding RPC roles and independent browsers. PGlite has built-in UUID generation but does not bundle pgcrypto, so the test omits only the extension installation statement; the actual Supabase project still needs its normal pgcrypto support. These checks do not replace testing actual Supabase API grants, Realtime and final production authorization. No live Supabase project was migrated during this audit.
-
-
-## Customer spreadsheet import
-
-Excel/CSV import needs no additional migration. Imported records use the existing customers columns: id, name, phone, email, notes and active. Ensure 202610170003_customer_activity.sql has been applied. Existing customer insert/read API permissions and the authentication prerequisite above still apply. Address imports map to notes rather than adding a separate address column. Connected imports check existing records with paginated reads and save through the preserved customer operation; this does not add a server-side phone uniqueness constraint. Validate imports against the actual project's permissions before delivery. `npm run test:customer-import` uses only isolated localhost servers and a mocked API.
+Passing local tests is evidence of the covered behavior, not an unconditional production certification or a guarantee against all infrastructure loss. Complete and record these installation checks before handing over a paid deployment.

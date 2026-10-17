@@ -1,5 +1,6 @@
 export interface Barber {
   id: string;
+  version?: number;
   name: string;
   active: boolean;
   commissionRate?: number; // percentage commission applied to this barber's sales
@@ -7,6 +8,7 @@ export interface Barber {
 
 export interface Service {
   id: string;
+  version?: number;
   name: string;
   price: number;
   duration?: number; // in minutes
@@ -15,6 +17,7 @@ export interface Service {
 
 export interface ServicePackage {
   id: string;
+  version?: number;
   name: string;
   price: number;
   services: string[]; // human-readable service names included in the bundle
@@ -23,6 +26,7 @@ export interface ServicePackage {
 
 export interface Customer {
   id: string;
+  version?: number;
   name: string;
   phone: string;
   email?: string;
@@ -40,6 +44,7 @@ export interface InvoiceItem {
 
 export interface Invoice {
   id: string;
+  version?: number;
   date: string;
   customerId?: string;
   customerName: string;

@@ -1,3 +1,4 @@
+import { roundMoney } from '../utils/money';
 import React, { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useStore } from '../store/useStore';
@@ -53,8 +54,8 @@ export const Invoices: React.FC = () => {
     setCurrentPage(1);
   }, [filterBarber, filterStatus, filterMonth, filterStartDate, filterEndDate]);
 
-  const editSubtotal = editItems.reduce((sum, item) => sum + item.price, 0);
-  const editDiscountAmount = Math.max(
+  const editSubtotal = roundMoney(editItems.reduce((sum, item) => sum + roundMoney(item.price), 0));
+  const editDiscountAmount = roundMoney(Math.max(
     0,
     Math.min(
       editForm.discountType === 'percent'
@@ -62,8 +63,8 @@ export const Invoices: React.FC = () => {
         : editForm.discountValue,
       editSubtotal
     )
-  );
-  const editTotal = Math.max(0, editSubtotal - editDiscountAmount);
+  ));
+  const editTotal = roundMoney(Math.max(0, editSubtotal - editDiscountAmount));
 
   const uniqueBarbers = [...new Set(invoices.flatMap(inv => inv.items.map(i => i.barberName)))];
 
@@ -188,9 +189,11 @@ export const Invoices: React.FC = () => {
     setFilterEndDate(formatLocal(end));
   };
 
+  const editingVersion = useRef<number|undefined>();
   const openEdit = (id: string) => {
     const invoice = invoices.find((inv) => inv.id === id);
     if (!invoice) return;
+    editingVersion.current=invoice.version;
     const discountType = invoice.discountType || 'amount';
     const discountValue = invoice.discountValue ?? invoice.discount;
     setEditForm({
@@ -263,6 +266,7 @@ export const Invoices: React.FC = () => {
     const discountAmount = editDiscountAmount;
     const updated: typeof existing = {
       ...existing,
+      version: editingVersion.current,
       customerName: editForm.customerName,
       status: editForm.status as 'paid' | 'pending' | 'cancelled',
       paymentMode: editForm.paymentMode,
@@ -282,9 +286,10 @@ export const Invoices: React.FC = () => {
     }
   };
 
-  const handleVerifyPin = (e: React.FormEvent) => {
+  const handleVerifyPin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (verifyInvoicePin(pinInput)) {
+    try {
+    if (await verifyInvoicePin(pinInput, pendingAction?.id, pendingAction?.type)) {
       setShowPinModal(false);
       setPinInput('');
       setPinError('');
@@ -296,8 +301,9 @@ export const Invoices: React.FC = () => {
       }
       setPendingAction(null);
     } else {
-      setPinError('Incorrect PIN');
+      setPinError('Incorrect PIN, PIN not configured, or too many attempts.');
     }
+    } catch(error) {setPinError(error instanceof Error?error.message:'Unable to verify PIN.');}
   };
 
   const openInvoice = (invoice: Invoice) => {
