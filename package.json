@@ -16,7 +16,8 @@
     "test:shared-settings": "node tools/category-sync-test.mjs",
     "test:mobile": "node tools/mobile-smoke.mjs",
     "test:mobile-billing": "node tools/mobile-billing-smoke.mjs",
-    "test:migrations": "node tools/migrations-test.mjs"
+    "test:migrations": "node tools/migrations-test.mjs",
+    "test:customer-import": "node tools/customer-import-smoke.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.91.1",
@@ -24,7 +25,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.30.1",
-    "xlsx": "^0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zustand": "^4.4.7"
   },
   "devDependencies": {

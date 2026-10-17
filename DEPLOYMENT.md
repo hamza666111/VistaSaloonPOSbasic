@@ -105,3 +105,8 @@ The mobile redesign adds no database migration. It retains the original billing/
 ## Migration audit
 
 `npm run test:migrations` initializes a fresh embedded PostgreSQL database using all four files, checks the existing service/customer/deal/invoice payloads, and then applies the additive upgrades repeatedly to both fresh and original-schema installations. It checks preservation of inactive clients, account passwords, invoices, branding and access grants. The separate `test:shared-settings` suite tests category/branding RPC roles and independent browsers. PGlite has built-in UUID generation but does not bundle pgcrypto, so the test omits only the extension installation statement; the actual Supabase project still needs its normal pgcrypto support. These checks do not replace testing actual Supabase API grants, Realtime and final production authorization. No live Supabase project was migrated during this audit.
+
+
+## Customer spreadsheet import
+
+Excel/CSV import needs no additional migration. Imported records use the existing customers columns: id, name, phone, email, notes and active. Ensure 202610170003_customer_activity.sql has been applied. Existing customer insert/read API permissions and the authentication prerequisite above still apply. Address imports map to notes rather than adding a separate address column. Connected imports check existing records with paginated reads and save through the preserved customer operation; this does not add a server-side phone uniqueness constraint. Validate imports against the actual project's permissions before delivery. `npm run test:customer-import` uses only isolated localhost servers and a mocked API.

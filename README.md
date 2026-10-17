@@ -53,7 +53,7 @@ The smoke check covers sign-in, all application routes, settings tabs, discounte
 
 Removed unused template dependencies (animation, physics, 3D, translation, UI helpers, validation), the template Vite plugin, generator manifests, completed AI task notes, placeholder directory READMEs, unused background art, and the former receipt QR asset. Active duplicate matching, receipt caching, invoice editing, spreadsheet exports, Supabase setup scripts, and deployment route rewrites are retained.
 
-Inherited dependency advisories remain, including the retained spreadsheet package. Resolve them in a separate dependency/security update before commercial deployment; a forced upgrade was not applied during the UI redesign.
+The spreadsheet reader now uses the official SheetJS 0.20.3 distribution for customer uploads and existing exports. Review remaining dependency advisories before commercial deployment.
 
 ## Local mock-data preview
 
@@ -114,3 +114,16 @@ Mobile billing opens on Services, with a separate Deals & offers tab. Search can
 ## Complete Supabase setup
 
 The migrations folder now includes a guarded fresh-project baseline plus additive category, app branding, and customer activity migrations. A fresh project must apply all four files in filename order. An installation already created using the original root SQL scripts must skip the fresh baseline and apply the missing additive upgrades. See [DEPLOYMENT.md](./DEPLOYMENT.md) for exact ordering and the existing authentication/permission prerequisites. The mobile redesign, manual WhatsApp sharing and receipt actions need no additional database fields.
+
+
+## Import customers from Excel
+
+Client book has Import Excel beside Export Excel. Download the template or use an existing exported file with Complete Name and Numbers headings. Files can be .xlsx, .xls, or .csv, up to 5 MB and 1,000 customer rows plus headings. Put headers in the first row. Choose the worksheet and match columns when names differ. Email and Notes / address are optional; address values are stored as customer notes.
+
+The preview identifies valid rows, duplicate phones (including duplicates inside the file), missing/invalid values and formula cells. Only ready rows are imported after confirmation. Existing customers, invoices and historical data are never overwritten. Keep phone cells as Text, or use an Excel number format that preserves leading zeros; zeros already discarded by Excel cannot be recovered. CSV is read without automatic number conversion. Matching follows the existing phone-suffix duplicate rule, with exact digit matching for shorter numbers. Concurrent writes on different devices remain subject to the inherited customer table's constraints; this does not add a database uniqueness constraint.
+
+Connected imports check all existing customer pages before saving and use the existing addCustomer operation. Saving pauses on a failure; successfully saved rows remain saved, and retry skips them. A connection loss may queue an individual row through the existing offline queue; it is labelled waiting to sync and remaining rows pause. Disconnected imports save locally. Local exports also work without Supabase. File contents are parsed in the browser; customers are written through the normal configured backend connection.
+
+No new schema or migration is needed: imports use id, name, phone, email, notes and active. New installations must still apply the four existing migrations, including customer_activity. Run `npm run test:customer-import` for isolated local and mocked remote tests, plus `npm run test:migrations` for schema checks. The import tests do not contact a live Supabase project.
+
+The [official SheetJS installation](https://docs.sheetjs.com/docs/getting-started/installation/nodejs/) and [parse options](https://docs.sheetjs.com/docs/api/parse-options/) describe the pinned distribution and formatted/raw cell handling used here. Spreadsheet support stays loaded on demand.

@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
-import { CalendarClock, CreditCard, Download, MapPin, Phone, Scissors, Search, User, Wallet, ArrowLeft } from 'lucide-react';
+import { CalendarClock, CreditCard, Download, MapPin, Phone, Scissors, Search, User, Wallet, ArrowLeft, Upload } from 'lucide-react';
 import { supabase } from '../api/supabase';
+import { CustomerImportDialog } from '../components/CustomerImportDialog';
 import { isDemoMode } from '../demo/mode';
 
 export const Customers: React.FC = () => {
@@ -10,6 +11,7 @@ export const Customers: React.FC = () => {
   const [mobileDetailOpen,setMobileDetailOpen]=useState(false);
   const [search, setSearch] = useState('');
   const [visitStatusFilter, setVisitStatusFilter] = useState<'all' | 'paid' | 'pending'>('all');
+  const [importOpen,setImportOpen]=useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
   const filteredCustomers = useMemo(() => {
@@ -104,17 +106,13 @@ export const Customers: React.FC = () => {
     setIsExporting(true);
     try {
       const XLSX=await import('xlsx');
-    if (isDemoMode) {
+    if (isDemoMode || !supabase) {
       const rows = [...customers].sort((a, b) => a.name.localeCompare(b.name)).map(customer => ({
         'Complete Name': customer.name, Numbers: customer.phone,
       }));
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Customers');
-      XLSX.writeFile(workbook, 'vistasaloonmanagement-demo-customers.xlsx');
-      return;
-    }
-    if (!supabase) {
-      alert('Database is not configured. Please check Supabase settings.');
+      XLSX.writeFile(workbook, isDemoMode ? 'vistasaloonmanagement-demo-customers.xlsx' : 'vistasaloonmanagement-local-customers.xlsx');
       return;
     }
 
@@ -186,6 +184,7 @@ export const Customers: React.FC = () => {
           <p className="text-gray-500 text-sm">Every visit, every detail. Build relationships that last.</p>
         </div>
         <div className="flex flex-wrap gap-3 items-center justify-end w-full sm:w-auto">
+          <div className="customer-transfer-actions">
           <button
             onClick={handleExportCustomers}
             disabled={isExporting}
@@ -194,6 +193,8 @@ export const Customers: React.FC = () => {
             <Download className="w-4 h-4" />
             {isExporting ? 'Exporting...' : 'Export Excel'}
           </button>
+          <button type="button" onClick={()=>setImportOpen(true)} className="customer-import-trigger inline-flex items-center justify-center gap-2 border border-teal-200 bg-white text-teal-700 px-4 py-2 rounded-lg"><Upload size={16}/>Import Excel</button>
+          </div>
           <div className="flex items-center gap-2 bg-white border border-teal-100 rounded-lg px-3 py-2 shadow-sm w-full sm:w-80">
             <Search className="w-4 h-4 text-teal-500" />
             <input
@@ -222,6 +223,7 @@ export const Customers: React.FC = () => {
         </div>
       </div>
 
+      {importOpen&&<CustomerImportDialog onClose={()=>setImportOpen(false)}/>}
       <div className="client-layout grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="client-list-pane bg-white rounded-xl shadow-sm border border-teal-100 overflow-hidden">
           <div className="p-4 border-b border-teal-100 bg-stone-50 font-semibold text-gray-700">
