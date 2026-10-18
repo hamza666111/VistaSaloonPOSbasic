@@ -20,7 +20,9 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
   const settings=useAppSettings(state=>state.settings);
   const location = useLocation();
   const navigate = useNavigate();
-  const { logout, lastSyncMessage, cacheWarning, syncData } = useStore();
+  const { logout, lastSyncMessage, cacheWarning, syncData, pendingMutations, flushPendingMutations } = useStore();
+  const [retrying,setRetrying]=useState(false);
+  const blockedInvoices=pendingMutations.filter(entry=>entry.status==='blocked');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const drawerRef=useRef<HTMLElement>(null);
   const mobile=useMediaQuery('(max-width: 1023px)');
@@ -53,7 +55,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
       </aside>
       <main className="workspace-main">
         <div className="mobile-toolbar no-print"><div className="mobile-toolbar-brand"><img src={settings.logoDataUrl||'/logo.svg'} alt="" aria-hidden="true"/><div><span className="mobile-salon-name">{settings.salonName}</span><span className="mobile-page-name">{navigation.find(item=>item.path===location.pathname)?.label}</span></div></div><button aria-label={isSidebarOpen ? 'Close navigation' : 'Open navigation'} aria-expanded={isSidebarOpen} aria-controls="main-navigation" onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="mobile-menu"><Menu size={21}/></button></div>
-        <div className="workspace-content">{cacheWarning&&<p role="status" className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{cacheWarning}</p>}{lastSyncMessage&&<div role="status" className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><span>{lastSyncMessage}</span><button type="button" className="shrink-0 underline" onClick={()=>void syncData().catch(()=>{})}>Refresh</button></div>}{children}</div>
+        <div className="workspace-content">{pendingMutations.length>0&&<div role="status" className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><div><strong>{pendingMutations.length} {pendingMutations.length===1?'invoice':'invoices'} pending sync</strong><p>Saved on this device. Sync resumes automatically while the app is open. Keep browser data until synced.</p>{blockedInvoices.length>0&&<p className="mt-1 text-red-700">{blockedInvoices.length} {blockedInvoices.length===1?'invoice needs':'invoices need'} attention: {blockedInvoices[0].error}</p>}</div><button type="button" disabled={retrying} className="shrink-0 underline disabled:opacity-50" onClick={()=>{setRetrying(true);void flushPendingMutations().catch(()=>{}).finally(()=>setRetrying(false));}}>{retrying?'Syncing...':'Retry sync'}</button></div>}{cacheWarning&&<p role="status" className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{cacheWarning}</p>}{lastSyncMessage&&<div role="status" className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><span>{lastSyncMessage}</span><button type="button" className="shrink-0 underline" onClick={()=>void syncData().catch(()=>{})}>Refresh</button></div>}{children}</div>
         <footer className="workspace-footer no-print"><span>{settings.salonName} POS System</span><span className="developer-watermark">Developed by FlagVista</span></footer>
         <nav className="mobile-bottom-nav no-print" aria-label="Quick navigation">
           {navigation.slice(0,4).map(({path,label,icon:Icon})=><Link key={path} to={path} aria-current={location.pathname===path?'page':undefined} onClick={()=>setIsSidebarOpen(false)}><Icon size={21}/><span>{path==='/'?'POS':path==='/customers'?'Clients':label}</span></Link>)}

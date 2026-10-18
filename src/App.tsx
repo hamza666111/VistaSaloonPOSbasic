@@ -36,6 +36,7 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 function App() {
   const authenticated=useStore(state=>state.isAuthenticated);
   useEffect(()=>startProductionSync(),[]);
+  useEffect(()=>{if(authenticated&&navigator.onLine)void Promise.allSettled([import('./pages/POS'),import('./pages/Invoices'),import('./pages/Customers'),import('./pages/Dashboard'),import('./pages/Statistics'),import('./pages/Settings')]);},[authenticated]);
   useEffect(()=>{if(authenticated || !isSupabaseConfigured())return startAppSettingsSync();},[authenticated]);
   useEffect(() => {
     void warmReceiptAssetsCache();
@@ -44,7 +45,7 @@ function App() {
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       const state = useStore.getState();
-      if (state.isSaving || state.pendingMutations.length > 0 || useServiceCategories.getState().isSaving || useAppSettings.getState().isSaving) {
+      if (state.isSaving || useServiceCategories.getState().isSaving || useAppSettings.getState().isSaving) {
         e.preventDefault();
         e.returnValue = '';
       }

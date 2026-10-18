@@ -70,6 +70,7 @@ export const POS: React.FC = () => {
   useDialogFocus(billRef,mobile && mobileBillOpen,()=>{if(!checkoutLock.current)setMobileBillOpen(false);});
 
   const checkoutLock = useRef(false);
+  const lastSavedId=useRef<string|null>(null);
   const checkoutDraft = useRef<{id:string;date:string}|null>(restoredDraft.checkoutDraft||null);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [checkoutError, setCheckoutError] = useState('');
@@ -80,6 +81,11 @@ export const POS: React.FC = () => {
     try{sessionStorage.setItem(draftStorageKey,JSON.stringify({cart,selectedBarberId,selectedCustomerId,discountValue,discountType,isPaid,paymentMode,checkoutDraft:checkoutDraft.current}));}
     catch{setCheckoutError('Browser storage is unavailable. Keep this tab open until the bill is saved.');}
   },[cart,selectedBarberId,selectedCustomerId,discountValue,discountType,isPaid,paymentMode,draftStorageKey]);
+
+  useEffect(()=>{
+    const saved=invoices.find(invoice=>invoice.id===lastSavedId.current);
+    if(saved?.version&&!saved.syncStatus)setCheckoutNotice(notice=>notice.replace('Invoice saved on this device. Pending sync to Supabase.','Invoice saved. Synced to Supabase.'));
+  },[invoices]);
 
   const subtotal = roundMoney(cart.reduce((sum, item) => sum + roundMoney(item.price), 0));
   const discountAmount = roundMoney(Math.max(0, Math.min(
@@ -262,6 +268,9 @@ export const POS: React.FC = () => {
         await createInvoice(invoice);
       }
 
+      const pending=!!useStore.getState().invoices.find(item=>item.id===invoiceId)?.syncStatus;
+      const saveNotice=pending?'Invoice saved on this device. Pending sync to Supabase.':'Invoice saved.';
+      lastSavedId.current=invoiceId;
       setCurrentInvoiceId(invoiceId);
       setLastInvoice(invoice);
 
@@ -270,13 +279,13 @@ export const POS: React.FC = () => {
         let printFailed = false;
         try { window.print(); } catch { printFailed = true; }
         handleNewBill();
-        setCheckoutNotice(printFailed ? 'Invoice saved. Open it in Invoices to try printing again.' : 'Invoice saved.');
+        setCheckoutNotice(printFailed ? `${saveNotice} Open it in Invoices to try printing again.` : saveNotice);
       } else {
         const url = action === 'whatsapp' ? invoiceWhatsAppUrl(invoice, phone) : null;
         const opened = url ? openPreparedWhatsApp(whatsAppWindow, url) : false;
         handleNewBill();
-        setCheckoutNotice(action === 'whatsapp' ? 'Invoice saved. Send the prepared message in WhatsApp.' : 'Invoice saved.');
-        if (url && !opened) { setWhatsAppFallback(url); setCheckoutNotice('Invoice saved. Your browser blocked the WhatsApp window.'); }
+        setCheckoutNotice(action === 'whatsapp' ? `${saveNotice} Send the prepared message in WhatsApp.` : saveNotice);
+        if (url && !opened) { setWhatsAppFallback(url); setCheckoutNotice(`${saveNotice} Your browser blocked the WhatsApp window.`); }
       }
     } catch (error) {
       try { whatsAppWindow?.close(); } catch { /* The browser may have closed it already. */ }

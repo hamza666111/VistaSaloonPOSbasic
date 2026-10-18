@@ -43,6 +43,8 @@ export interface InvoiceItem {
 }
 
 export interface Invoice {
+  syncStatus?: 'pending'|'blocked';
+  syncError?: string;
   id: string;
   version?: number;
   date: string;

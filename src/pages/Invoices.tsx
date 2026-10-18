@@ -1,3 +1,4 @@
+import { InvoiceSyncBadge } from '../components/InvoiceSyncBadge';
 import { roundMoney } from '../utils/money';
 import React, { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -537,11 +538,11 @@ export const Invoices: React.FC = () => {
                         : 'bg-teal-100 text-teal-700'
                     }`}>
                       {invoice.status === 'paid' ? 'Paid' : 'Unpaid'}
-                    </span>
+                    </span><InvoiceSyncBadge invoice={invoice}/>
                   </td>
                   <td data-label="Actions" className="p-4" onClick={(event) => event.stopPropagation()}>
                     <div className="invoice-actions flex items-center gap-2">
-                      <button
+                      <button disabled={!!invoice.syncStatus} title={invoice.syncStatus?'Sync this invoice before editing.':undefined}
                         onClick={() => {
                           setPendingAction({ type: 'edit', id: invoice.id });
                           setShowPinModal(true);
@@ -552,7 +553,7 @@ export const Invoices: React.FC = () => {
                         Edit
                       </button>
                       <button
-                        onClick={() => handleToggleStatus(invoice.id, invoice.status)}
+                        disabled={!!invoice.syncStatus} title={invoice.syncStatus?'Sync this invoice before changing payment status.':undefined} onClick={() => handleToggleStatus(invoice.id, invoice.status)}
                         className={`flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-medium transition-all duration-200 hover:scale-105 ${
                           invoice.status === 'paid'
                             ? 'bg-teal-50 text-teal-600 hover:bg-teal-100'
@@ -582,7 +583,7 @@ export const Invoices: React.FC = () => {
                         </div>
                       ) : (
                         <button
-                          onClick={() => setDeleteConfirm(invoice.id)}
+                          disabled={!!invoice.syncStatus} title={invoice.syncStatus?'Sync this invoice before deleting.':undefined} onClick={() => setDeleteConfirm(invoice.id)}
                           className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-all duration-200 hover:scale-105"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -658,7 +659,7 @@ export const Invoices: React.FC = () => {
               </button>
             </div>
 
-            <div className="invoice-preview-salon"><img src={logoSrc} alt={`${salonName} logo`} /><div><strong>{salonName}</strong>{salonAddress&&<p className="receipt-salon-address">{salonAddress}</p>}{salonPhone&&<p>{salonPhone}</p>}</div></div>
+            <InvoiceSyncBadge invoice={invoices.find(invoice=>invoice.id===viewInvoice.id)||viewInvoice}/><div className="invoice-preview-salon"><img src={logoSrc} alt={`${salonName} logo`} /><div><strong>{salonName}</strong>{salonAddress&&<p className="receipt-salon-address">{salonAddress}</p>}{salonPhone&&<p>{salonPhone}</p>}</div></div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm text-gray-700 mb-4">
               <div className="bg-teal-50 border border-teal-100 rounded-xl p-3 space-y-1">
                 <div className="receipt-detail-row flex justify-between"><span className="font-medium">Date</span><span>{new Date(viewInvoice.date).toLocaleString()}</span></div>

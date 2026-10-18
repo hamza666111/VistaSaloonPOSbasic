@@ -82,14 +82,12 @@ export const CustomerImportDialog:React.FC<{onClose:()=>void}>=({onClose})=>{
         else{
           try{
             await useStore.getState().addCustomer(candidate);
-            const queued=!!supabase&&useStore.getState().pendingMutations.some(item=>item.type==='customer:add'&&item.payload.customer?.id===candidate.id);
-            result=queued?{status:'queued',reason:'Added locally; waiting to sync.'}:{status:'imported',reason:supabase?'Saved to Supabase':'Imported locally'};
+            result={status:'imported',reason:supabase?'Saved to Supabase':'Imported locally'};
             fresh.push(candidate);
           }catch(cause){result=isDuplicateCustomerError(cause)?{status:'duplicate',reason:'Phone already exists. No record was overwritten.'}:{status:'failed',reason:cause instanceof Error?cause.message:'Unable to save this row. Retry when ready.'};}
         }
         if(mounted.current){setResults(current=>({...current,[candidate.id]:result}));setProgress({done:++done,total:targets.length});}
         if(done%10===0)await new Promise(resolve=>setTimeout(resolve,0));
-        if(result.status==='queued'){if(mounted.current)setError('A row is waiting to sync. Reconnect before importing the remaining rows.');break;}
         if(result.status==='failed'){if(mounted.current)setError('Import paused after a save error. Saved rows are kept; you can retry the remaining rows.');break;}
       }
     }finally{lock.current=false;if(mounted.current)setImporting(false);}
